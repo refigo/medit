@@ -107,8 +107,17 @@ class UserContactCreate(UserContactBase):
     contact_login_id: str
 
 
+class ContactUserInfo(SQLModel):
+    id: uuid.UUID
+    login_id: str
+    nickname: str
+    age_range: Optional[str] = None
+    gender: Optional[str] = None
+
+
 class UserContactRead(UserContactBase):
     id: uuid.UUID
     user_id: uuid.UUID
     contact_user_id: uuid.UUID
     created_at: datetime
+    contact_user: Optional[ContactUserInfo] = None

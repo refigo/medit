@@ -7,7 +7,8 @@ from app.database import get_session, create_db_and_tables
 from app.models import (
     User, UserCreate, UserRead,
     FamilyMember, FamilyMemberCreate, FamilyMemberRead,
-    UserContact, UserContactCreate, UserContactRead
+    UserContact, UserContactCreate, UserContactRead,
+    ContactUserInfo
 )
 from app.config import settings
 
@@ -182,7 +183,31 @@ def read_user_contacts(
         .offset(skip)
         .limit(limit)
     ).all()
-    return contacts
+    
+    # 연락처 사용자 정보 추가
+    result = []
+    for contact in contacts:
+        # 연락처 사용자 정보 조회
+        contact_user = session.get(User, contact.contact_user_id)
+        
+        # UserContactRead 모델에 맞게 데이터 구성
+        contact_data = UserContactRead(
+            id=contact.id,
+            user_id=contact.user_id,
+            contact_user_id=contact.contact_user_id,
+            alias=contact.alias,
+            created_at=contact.created_at,
+            contact_user=ContactUserInfo(
+                id=contact_user.id,
+                login_id=contact_user.login_id,
+                nickname=contact_user.nickname,
+                age_range=contact_user.age_range,
+                gender=contact_user.gender
+            ) if contact_user else None
+        )
+        result.append(contact_data)
+    
+    return result
 
 
 if __name__ == "__main__":
