@@ -235,7 +235,8 @@ class ConversationReportRead(ConversationReportBase):
 
 class DiseaseBase(SQLModel):
     name: str = Field(max_length=200)
-    description: Optional[str] = Field(default=None, sa_column=Column(Text))
+    summary: Optional[str] = Field(default=None, max_length=500, description="질병에 대한 간단한 설명")
+    description: Optional[str] = Field(default=None, sa_column=Column(Text), description="질병에 대한 상세 설명")
 
 
 class Disease(DiseaseBase, table=True):

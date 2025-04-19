@@ -36,26 +36,45 @@ async def startup():
     # 설정 출력
     print("서버가 시작되었습니다!")
     
-    # severity_level 열 추가 시도
+    # 데이터베이스 연결
     try:
-        # 데이터베이스 연결
         db_session = next(get_session())
         
-        # 해당 열이 존재하는지 확인
-        result = db_session.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name='conversation_reports' AND column_name='severity_level'")).fetchone()
-        
-        # 열이 존재하지 않으면 추가
-        if not result:
-            print("conversation_reports 테이블에 severity_level 열을 추가합니다...")
-            db_session.execute(text("ALTER TABLE conversation_reports ADD COLUMN severity_level VARCHAR DEFAULT 'green'"))
-            db_session.commit()
-            print("severity_level 열이 성공적으로 추가되었습니다.")
-        else:
-            print("severity_level 열이 이미 존재합니다.")
+        # 1. conversation_reports 테이블: severity_level 열 추가 시도
+        try:
+            # 해당 열이 존재하는지 확인
+            result = db_session.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name='conversation_reports' AND column_name='severity_level'")).fetchone()
+            
+            # 열이 존재하지 않으면 추가
+            if not result:
+                print("conversation_reports 테이블에 severity_level 열을 추가합니다...")
+                db_session.execute(text("ALTER TABLE conversation_reports ADD COLUMN severity_level VARCHAR DEFAULT 'green'"))
+                db_session.commit()
+                print("severity_level 열이 성공적으로 추가되었습니다.")
+            else:
+                print("severity_level 열이 이미 존재합니다.")
+        except Exception as e:
+            print(f"severity_level 열 추가 오류: {str(e)}")
+            
+        # 2. diseases 테이블: summary 열 추가 시도
+        try:
+            # 해당 열이 존재하는지 확인
+            result = db_session.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name='diseases' AND column_name='summary'")).fetchone()
+            
+            # 열이 존재하지 않으면 추가
+            if not result:
+                print("diseases 테이블에 summary 열을 추가합니다...")
+                db_session.execute(text("ALTER TABLE diseases ADD COLUMN summary VARCHAR(500) DEFAULT NULL"))
+                db_session.commit()
+                print("summary 열이 성공적으로 추가되었습니다.")
+            else:
+                print("summary 열이 이미 존재합니다.")
+        except Exception as e:
+            print(f"summary 열 추가 오류: {str(e)}")
             
         db_session.close()
     except Exception as e:
-        print(f"데이터베이스 열 추가 오류: {str(e)}")
+        print(f"데이터베이스 연결 오류: {str(e)}")
 
 # Add CORS middleware
 app.add_middleware(
@@ -893,23 +912,30 @@ def read_conversation_reports(
 
 
 # Disease endpoints
-@app.post("/diseases/", response_model=DiseaseRead, tags=["Diseases"], summary="질병 정보 생성")
-def create_disease(
-    disease: DiseaseCreate = ...,
+@app.post("/diseases/", response_model=DiseaseRead, tags=["Diseases"], summary="질병 정보 추가")
+async def create_disease(
+    disease: DiseaseCreate,
     session: Session = Depends(get_session)
 ):
     """
-    질병 정보를 생성합니다.
+    질병 정보를 추가합니다.
     
-    - **name**: 질병 이름
-    - **description**: 질병에 대한 설명
+    - **name**: 질병명
+    - **summary**: 질병에 대한 간단한 설명 (선택)
+    - **description**: 질병에 대한 상세 설명 (선택)
     """
-    # 이미 존재하는 질병인지 확인
-    existing_disease = session.exec(
-        select(Disease).where(Disease.name == disease.name)
-    ).first()
+    # 기존 질병명 확인
+    existing_disease = session.exec(select(Disease).where(Disease.name == disease.name)).first()
     
     if existing_disease:
+        # 기존 질병이 있다면 업데이트
+        for key, value in disease.dict(exclude={"id"}).items():
+            if value is not None:
+                setattr(existing_disease, key, value)
+        
+        session.add(existing_disease)
+        session.commit()
+        session.refresh(existing_disease)
         return existing_disease
     
     # 새 질병 생성
@@ -917,29 +943,28 @@ def create_disease(
     session.add(db_disease)
     session.commit()
     session.refresh(db_disease)
-    
     return db_disease
 
 
-@app.get("/diseases/", response_model=list[DiseaseRead], tags=["Diseases"], summary="질병 정보 목록 조회")
-def read_diseases(
-    session: Session = Depends(get_session),
+@app.get("/diseases/", response_model=List[DiseaseRead], tags=["Diseases"], summary="질병 목록 조회")
+async def get_diseases(
     skip: int = 0,
-    limit: int = 100
+    limit: int = 100,
+    session: Session = Depends(get_session)
 ):
     """
-    질병 정보 목록을 조회합니다.
+    질병 목록을 조회합니다.
     
     - **skip**: 건너뛸 항목 수
-    - **limit**: 최대 반환할 항목 수
+    - **limit**: 반환할 최대 항목 수
     """
     diseases = session.exec(select(Disease).offset(skip).limit(limit)).all()
     return diseases
 
 
-@app.get("/diseases/{disease_id}", response_model=DiseaseRead, tags=["Diseases"], summary="질병 정보 상세 조회")
-def read_disease(
-    disease_id: int = Path(..., description="질병 ID"),
+@app.get("/diseases/{disease_id}", response_model=DiseaseRead, tags=["Diseases"], summary="특정 질병 조회")
+async def get_disease(
+    disease_id: int,
     session: Session = Depends(get_session)
 ):
     """
@@ -949,9 +974,70 @@ def read_disease(
     """
     disease = session.get(Disease, disease_id)
     if not disease:
-        raise HTTPException(status_code=404, detail="Disease not found")
-    
+        raise HTTPException(status_code=404, detail="해당 질병을 찾을 수 없습니다.")
     return disease
+
+
+@app.put("/diseases/{disease_id}", response_model=DiseaseRead, tags=["Diseases"], summary="질병 정보 업데이트")
+async def update_disease(
+    disease_id: int,
+    disease_update: DiseaseCreate,
+    session: Session = Depends(get_session)
+):
+    """
+    특정 질병 정보를 업데이트합니다.
+    
+    - **disease_id**: 업데이트할 질병 ID
+    - **name**: 질병명
+    - **summary**: 질병에 대한 간단한 설명 (선택)
+    - **description**: 질병에 대한 상세 설명 (선택)
+    """
+    db_disease = session.get(Disease, disease_id)
+    if not db_disease:
+        raise HTTPException(status_code=404, detail="해당 질병을 찾을 수 없습니다.")
+    
+    # 업데이트 수행
+    for key, value in disease_update.dict().items():
+        if value is not None:
+            setattr(db_disease, key, value)
+    
+    session.add(db_disease)
+    session.commit()
+    session.refresh(db_disease)
+    return db_disease
+
+
+@app.delete("/diseases/{disease_id}", tags=["Diseases"], summary="질병 정보 삭제")
+async def delete_disease(
+    disease_id: int,
+    session: Session = Depends(get_session)
+):
+    """
+    특정 질병 정보를 삭제합니다.
+    
+    - **disease_id**: 삭제할 질병 ID
+    """
+    db_disease = session.get(Disease, disease_id)
+    if not db_disease:
+        raise HTTPException(status_code=404, detail="해당 질병을 찾을 수 없습니다.")
+    
+    session.delete(db_disease)
+    session.commit()
+    return {"message": "질병 정보가 성공적으로 삭제되었습니다."}
+
+
+@app.get("/diseases/search/{name}", response_model=List[DiseaseRead], tags=["Diseases"], summary="질병명으로 검색")
+async def search_disease_by_name(
+    name: str,
+    session: Session = Depends(get_session)
+):
+    """
+    질병명을 포함하는 질병 정보를 검색합니다.
+    
+    - **name**: 검색할 질병명 일부
+    """
+    diseases = session.exec(select(Disease).where(Disease.name.contains(name))).all()
+    return diseases
 
 
 @app.get("/users/{login_id}/reports/diseases/", response_model=Dict[str, List[Dict[str, Any]]], tags=["Reports"], summary="사용자의 모든 리포트에서 질환 및 확률 정보 조회")
