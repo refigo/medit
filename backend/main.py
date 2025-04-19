@@ -660,7 +660,7 @@ def read_conversation_reports(
     reports = session.exec(
         select(ConversationReport)
         .where(ConversationReport.conversation_id == conversation_id)
-        .order_by(ConversationReport.created_at.desc())
+        .order_by(desc(ConversationReport.created_at))
         .offset(skip)
         .limit(limit)
     ).all()
@@ -894,7 +894,7 @@ def generate_ai_greeting(user: User) -> str:
         time_greeting = "늦은 시간에도 찾아주셨네요"
     
     # 사용자 이름을 포함한 인사말
-    name_greeting = f"{user.nickname}님, {time_greeting}! 메디트 AI 어시스턴트입니다."
+    name_greeting = f"{user.nickname if user.nickname else '이름 없음'}님, {time_greeting}! 메디트 AI 어시스턴트입니다."
     
     # 기본 인사말
     base_greeting = "건강 관련 궁금한 점이 있으신가요? 어떻게 도와드릴까요?"
@@ -987,13 +987,31 @@ def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Sessi
         if message.sender == "user":
             conversation_text += f"{message.content}\n"
     
+    conversation_text_lower = conversation_text.lower()
+    
     # 증상 감지 (대화에서 언급된 증상 추출)
     detected_symptoms = set()
     for symptom in common_symptoms:
-        if symptom.lower() in conversation_text.lower():
+        if symptom.lower() in conversation_text_lower:
             detected_symptoms.add(symptom)
     
-    if not detected_symptoms:
+    # 직접 언급된 질병 감지
+    directly_mentioned_diseases = set()
+    # 모든 질병 이름 목록 생성 (중복 제거)
+    all_diseases = set()
+    for symptoms_list in symptom_disease_map.values():
+        all_diseases.update(symptoms_list)
+    
+    for disease in all_diseases:
+        if disease.lower() in conversation_text_lower:
+            directly_mentioned_diseases.add(disease)
+            # 해당 질병과 관련된 대표 증상도 추가 (분석의 정확도를 위해)
+            for symptom, diseases in symptom_disease_map.items():
+                if disease in diseases:
+                    detected_symptoms.add(symptom)
+    
+    # 어떤 증상도 발견되지 않았고, 직접 언급된 질병도 없는 경우
+    if not detected_symptoms and not directly_mentioned_diseases:
         return {
             "symptoms": [],
             "diseases_with_probabilities": [],
@@ -1011,18 +1029,32 @@ def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Sessi
                 disease_symptom_counts[disease] = 0
             disease_symptom_counts[disease] += 1
     
+    # 직접 언급된 질병 추가
+    possible_diseases.update(directly_mentioned_diseases)
+    for disease in directly_mentioned_diseases:
+        # 직접 언급된 질병은 높은 점수 부여
+        disease_symptom_counts[disease] = disease_symptom_counts.get(disease, 0) + 3
+    
     # 질병 확률 계산 (단순 알고리즘)
     disease_probabilities = {}
     for disease in possible_diseases:
-        matched_symptom_count = disease_symptom_counts.get(disease, 0)
-        total_symptom_count = len(symptom_disease_map.get(disease, []))
+        if disease in directly_mentioned_diseases:
+            # 직접 언급된 질병은 높은 확률 부여 (80~95%)
+            probability = 80 + (disease_symptom_counts.get(disease, 3) - 3) * 5
+            probability = min(95, probability)
+        else:
+            matched_symptom_count = disease_symptom_counts.get(disease, 0)
+            total_symptom_count = len(symptom_disease_map.get(disease, []))
+            
+            if total_symptom_count > 0:
+                # 간단한 확률 계산 (매칭된 증상 수 / 질병 관련 전체 증상 수)
+                probability = (matched_symptom_count / total_symptom_count) * 100
+                # 최소 확률 50%, 최대 95%로 제한
+                probability = min(95, max(50, probability))
+            else:
+                probability = 50.0
         
-        if total_symptom_count > 0:
-            # 간단한 확률 계산 (매칭된 증상 수 / 질병 관련 전체 증상 수)
-            probability = (matched_symptom_count / total_symptom_count) * 100
-            # 최소 확률 50%, 최대 95%로 제한
-            probability = min(95, max(50, probability))
-            disease_probabilities[disease] = round(probability, 1)
+        disease_probabilities[disease] = round(probability, 1)
     
     # 확률 기반 질병 정렬
     sorted_diseases = sorted(
@@ -1031,7 +1063,7 @@ def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Sessi
         reverse=True
     )
     
-    # 건강 관리 조언 생성
+    # 건강 조언 생성
     collected_suggestions = set()
     for disease in sorted_diseases[:3]:  # 상위 3개 질환에 대한 제안만 수집
         if disease in disease_suggestions:
