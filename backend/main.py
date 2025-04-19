@@ -908,73 +908,91 @@ def generate_ai_greeting(user: User) -> str:
     return f"{name_greeting}{health_greeting}\n\n{base_greeting}"
 
 
-# 대화 내용을 분석하여 증상 및 질환 파악하는 함수
+# 질병 및 증상 관련 샘플 데이터
+# 실제 프로덕션에서는 외부 의료 API/데이터베이스와 연동이 필요할 수 있습니다
+common_symptoms = [
+    "두통", "복통", "열", "기침", "어지러움", "피로", "메스꺼움", "설사", 
+    "근육통", "발열", "인후통", "콧물", "발진", "관절통"
+]
+
+# 증상 키워드와 연관 질환 매핑 (샘플 데이터)
+symptom_disease_map = {
+    "두통": ["편두통", "긴장성 두통", "군발성 두통"],
+    "복통": ["위염", "장염", "과민성 대장 증후군"],
+    "열": ["감기", "독감", "코로나19"],
+    "기침": ["감기", "기관지염", "코로나19"],
+    "어지러움": ["빈혈", "현기증", "저혈압"],
+    "피로": ["만성피로증후군", "빈혈", "갑상선 기능 저하증"],
+    "메스꺼움": ["위염", "멀미", "편두통"],
+    "설사": ["장염", "과민성 대장 증후군", "식중독"],
+    "근육통": ["근육염", "독감", "섬유근육통"],
+    "발열": ["감기", "독감", "폐렴"],
+    "인후통": ["인두염", "편도염", "후두염"],
+    "콧물": ["비염", "감기", "알레르기"],
+    "발진": ["알레르기", "습진", "수두"],
+    "관절통": ["관절염", "류마티스 관절염", "통풍"]
+}
+
+# 질환별 증상 매핑 (역방향 매핑 생성)
+disease_symptoms = {}
+for symptom, diseases in symptom_disease_map.items():
+    for disease in diseases:
+        if disease not in disease_symptoms:
+            disease_symptoms[disease] = []
+        disease_symptoms[disease].append(symptom)
+
+# 질환별 건강 제안 (샘플 데이터)
+disease_suggestions = {
+    "편두통": ["충분한 수면 취하기", "스트레스 관리하기", "정기적인 운동하기"],
+    "긴장성 두통": ["목과 어깨 스트레칭", "스트레스 관리", "따뜻한 목욕"],
+    "위염": ["자극적인 음식 피하기", "작은 양 자주 먹기", "금주하기"],
+    "장염": ["충분한 수분 섭취", "소화가 쉬운 음식 먹기", "휴식 취하기"],
+    "감기": ["충분한 휴식", "수분 섭취", "비타민 C 섭취"],
+    "독감": ["집에서 휴식", "해열제 복용 고려", "충분한 수분 섭취"],
+    "빈혈": ["철분이 풍부한 음식 섭취", "비타민 C와 함께 철분 섭취", "과로 피하기"],
+    "저혈압": ["천천히 일어나기", "작은 양 자주 먹기", "충분한 수분 섭취"],
+    "알레르기": ["알레르기 유발 물질 피하기", "항히스타민제 고려", "의사와 상담"],
+}
+
+# 일반적인 건강 제안 (기본값)
+general_suggestions = [
+    "충분한 휴식과 수면을 취하세요",
+    "물을 충분히 마시세요",
+    "균형 잡힌 식단을 유지하세요",
+    "규칙적인 운동을 하세요",
+    "스트레스를 관리하세요"
+]
+
+
+# 대화 내용을 분석하여 질병 가능성 판단
 def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Session) -> dict:
-    """대화 내용을 분석하여 언급된 증상들로부터 가능한 질환과 확률을 파악합니다."""
-    # 대화 메시지 전체 조회
+    """대화 내용을 분석하여 가능성 있는 질병을 탐지합니다."""
+    # 대화 메시지 조회
     messages = session.exec(
-        select(ConversationMessage)
-        .where(ConversationMessage.conversation_id == conversation_id)
-        .order_by(ConversationMessage.sequence)
+        select(ConversationMessage).where(
+            ConversationMessage.conversation_id == conversation_id
+        ).order_by(ConversationMessage.created_at)
     ).all()
     
-    # 증상 키워드와 연관 질환 매핑 (샘플 데이터)
-    symptom_disease_map = {
-        "두통": ["편두통", "긴장성 두통", "군발성 두통"],
-        "복통": ["위염", "장염", "과민성 대장 증후군"],
-        "열": ["감기", "독감", "코로나19"],
-        "기침": ["감기", "기관지염", "코로나19"],
-        "어지러움": ["빈혈", "현기증", "저혈압"],
-        "피로": ["만성피로증후군", "빈혈", "갑상선 기능 저하증"],
-        "메스꺼움": ["위염", "멀미", "편두통"],
-        "설사": ["장염", "과민성 대장 증후군", "식중독"],
-        "근육통": ["근육염", "독감", "섬유근육통"],
-        "발열": ["감기", "독감", "폐렴"],
-        "인후통": ["인두염", "편도염", "후두염"],
-        "콧물": ["비염", "감기", "알레르기"],
-        "발진": ["알레르기", "습진", "수두"],
-        "관절통": ["관절염", "류마티스 관절염", "통풍"]
-    }
+    if not messages:
+        return {
+            "symptoms": [],
+            "diseases_with_probabilities": [],
+            "suggestions": general_suggestions
+        }
     
-    # 질환별 증상 매핑 (역방향 매핑 생성)
-    disease_symptoms = {}
-    for symptom, diseases in symptom_disease_map.items():
-        for disease in diseases:
-            if disease not in disease_symptoms:
-                disease_symptoms[disease] = []
-            disease_symptoms[disease].append(symptom)
-    
-    # 질환별 건강 제안 (샘플 데이터)
-    disease_suggestions = {
-        "편두통": ["충분한 수면 취하기", "스트레스 관리하기", "정기적인 운동하기"],
-        "긴장성 두통": ["목과 어깨 스트레칭", "스트레스 관리", "따뜻한 목욕"],
-        "위염": ["자극적인 음식 피하기", "작은 양 자주 먹기", "금주하기"],
-        "장염": ["충분한 수분 섭취", "소화가 쉬운 음식 먹기", "휴식 취하기"],
-        "감기": ["충분한 휴식", "수분 섭취", "비타민 C 섭취"],
-        "독감": ["집에서 휴식", "해열제 복용 고려", "충분한 수분 섭취"],
-        "빈혈": ["철분이 풍부한 음식 섭취", "비타민 C와 함께 철분 섭취", "과로 피하기"],
-        "저혈압": ["천천히 일어나기", "작은 양 자주 먹기", "충분한 수분 섭취"],
-        "알레르기": ["알레르기 유발 물질 피하기", "항히스타민제 고려", "의사와 상담"],
-    }
-    
-    # 일반적인 건강 제안 (기본값)
-    general_suggestions = [
-        "충분한 휴식과 수면을 취하세요",
-        "물을 충분히 마시세요",
-        "균형 잡힌 식단을 유지하세요",
-        "규칙적인 운동을 하세요",
-        "스트레스를 관리하세요"
-    ]
-    
-    # 대화에서 언급된 증상들 추출
-    detected_symptoms = set()
+    # 대화 내용 분석을 위한 텍스트 추출
+    conversation_text = ""
     for message in messages:
-        message_content = message.content.lower()
-        for symptom in symptom_disease_map.keys():
-            if symptom in message_content:
-                detected_symptoms.add(symptom)
+        if message.sender == "user":
+            conversation_text += f"{message.content}\n"
     
-    # 증상이 없을 경우 빈 결과 반환
+    # 증상 감지 (대화에서 언급된 증상 추출)
+    detected_symptoms = set()
+    for symptom in common_symptoms:
+        if symptom.lower() in conversation_text.lower():
+            detected_symptoms.add(symptom)
+    
     if not detected_symptoms:
         return {
             "symptoms": [],
@@ -982,32 +1000,38 @@ def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Sessi
             "suggestions": general_suggestions
         }
     
-    # 각 질환별 점수 계산 (확률 산출 위함)
-    disease_scores = {}
+    # 증상 기반 질병 가능성 계산
+    possible_diseases = set()
+    disease_symptom_counts = {}
+    
     for symptom in detected_symptoms:
         for disease in symptom_disease_map.get(symptom, []):
-            if disease not in disease_scores:
-                disease_scores[disease] = 0
-            disease_scores[disease] += 1
+            possible_diseases.add(disease)
+            if disease not in disease_symptom_counts:
+                disease_symptom_counts[disease] = 0
+            disease_symptom_counts[disease] += 1
     
-    # 질환별 확률 계산
+    # 질병 확률 계산 (단순 알고리즘)
     disease_probabilities = {}
-    for disease, score in disease_scores.items():
-        if disease in disease_symptoms:
-            total_symptoms = len(disease_symptoms[disease])
-            # 최소 확률은 30%, 최대 확률은 90%로 제한
-            raw_probability = (score / total_symptoms) * 100
-            adjusted_probability = 30 + (raw_probability * 0.6)  # 30%~90% 범위로 조정
-            disease_probabilities[disease] = min(90, round(adjusted_probability, 1))
+    for disease in possible_diseases:
+        matched_symptom_count = disease_symptom_counts.get(disease, 0)
+        total_symptom_count = len(symptom_disease_map.get(disease, []))
+        
+        if total_symptom_count > 0:
+            # 간단한 확률 계산 (매칭된 증상 수 / 질병 관련 전체 증상 수)
+            probability = (matched_symptom_count / total_symptom_count) * 100
+            # 최소 확률 50%, 최대 95%로 제한
+            probability = min(95, max(50, probability))
+            disease_probabilities[disease] = round(probability, 1)
     
-    # 확률이 높은 순으로 질환 정렬
+    # 확률 기반 질병 정렬
     sorted_diseases = sorted(
-        disease_probabilities.keys(), 
-        key=lambda x: disease_probabilities[x], 
+        possible_diseases, 
+        key=lambda x: disease_probabilities.get(x, 0),
         reverse=True
     )
     
-    # 질환에 맞는 건강 제안 수집
+    # 건강 관리 조언 생성
     collected_suggestions = set()
     for disease in sorted_diseases[:3]:  # 상위 3개 질환에 대한 제안만 수집
         if disease in disease_suggestions:
@@ -1017,11 +1041,29 @@ def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Sessi
     if len(collected_suggestions) < 5:
         collected_suggestions.update(general_suggestions)
     
-    # 질환과 확률 정보를 하나의 리스트로 통합
+    # 질환과 확률 정보를 하나의 리스트로 통합하고 Disease 테이블과 연동
     diseases_with_probabilities = []
     for disease in sorted_diseases:
         probability = disease_probabilities.get(disease, 50.0)
+        
+        # 데이터베이스에서 질병 검색 또는 생성
+        db_disease = session.exec(
+            select(Disease).where(Disease.name == disease)
+        ).first()
+        
+        if not db_disease:
+            # 새 질병 생성
+            db_disease = Disease(
+                name=disease,
+                description=f"{disease}는 일반적으로 {', '.join(symptom_disease_map.get(disease, [])[:3])} 등의 증상과 연관됩니다."
+            )
+            session.add(db_disease)
+            session.commit()
+            session.refresh(db_disease)
+        
+        # 질병 ID를 포함하여 결과 저장
         diseases_with_probabilities.append({
+            "id": db_disease.id,
             "name": disease,
             "probability": probability
         })
