@@ -301,3 +301,4 @@ class ConversationWithMessage(ConversationRead):
 class MessageWithResponse(BaseModel):
     user_message: ConversationMessageRead
     conversation_message: ConversationMessageRead
+    generated_report: Optional[ConversationReportRead] = None

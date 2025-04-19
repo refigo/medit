@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 import uuid
 from typing import Optional, List
+from datetime import datetime
+from sqlalchemy import desc
 
 from app.database import get_session, create_db_and_tables
 from app.models import (
@@ -489,7 +491,7 @@ def create_conversation_message(
     last_message = session.exec(
         select(ConversationMessage)
         .where(ConversationMessage.conversation_id == conversation_id)
-        .order_by(ConversationMessage.sequence.desc())
+        .order_by(desc(ConversationMessage.sequence))
         .limit(1)
     ).first()
     
@@ -518,16 +520,52 @@ def create_conversation_message(
         content=ai_response_text,
         sequence=next_sequence + 1
     )
-    
     session.add(ai_message)
     session.commit()
     session.refresh(ai_message)
     
-    # 응답 구성
-    result = MessageWithResponse(
-        user_message=ConversationMessageRead.from_orm(user_message),
-        conversation_message=ConversationMessageRead.from_orm(ai_message)
-    )
+    # 대화 분석 및 자동 리포트 생성
+    if next_sequence + 1 == 7:  # 3번 정도의 핑퐁 후 (ai: 1,3,5, user: 2,4,6)
+        # 대화에서 증상 분석
+        detected_diseases = analyze_conversation_for_diseases(conversation_id, session)
+        
+        # 리포트 생성
+        report_content = generate_conversation_report(conversation_id, detected_diseases, session)
+        
+        # 리포트 저장
+        report = ConversationReport(
+            conversation_id=conversation_id,
+            title="자동 생성된 건강 분석 리포트",
+            summary="AI가 분석한 건강 상태 요약",
+            content=report_content
+        )
+        session.add(report)
+        session.commit()
+        session.refresh(report)
+        
+        # 리포트 정보를 응답에 포함
+        result = MessageWithResponse(
+            user_message=ConversationMessageRead.from_orm(user_message),
+            conversation_message=ConversationMessageRead.from_orm(ai_message),
+            generated_report=ConversationReportRead.from_orm(report)
+        )
+        
+        # AI가 리포트 생성 알림 메시지 전송
+        report_notification = ConversationMessage(
+            conversation_id=conversation_id,
+            sender="ai assistant",
+            content="대화 내용을 바탕으로 건강 분석 리포트를 생성했습니다. 리포트 탭에서 확인해주세요.",
+            sequence=next_sequence + 2
+        )
+        session.add(report_notification)
+        session.commit()
+    
+    else:
+        # 응답 구성
+        result = MessageWithResponse(
+            user_message=ConversationMessageRead.from_orm(user_message),
+            conversation_message=ConversationMessageRead.from_orm(ai_message)
+        )
     
     return result
 
@@ -853,6 +891,109 @@ def generate_ai_greeting(user: User) -> str:
     
     # 최종 인사말 조합
     return f"{name_greeting}{health_greeting}\n\n{base_greeting}"
+
+
+# 대화 내용을 분석하여 증상 및 질환 파악하는 함수
+def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Session) -> list[str]:
+    """대화 내용을 분석하여 언급된 증상들로부터 가능한 질환을 파악합니다."""
+    # 대화 메시지 전체 조회
+    messages = session.exec(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == conversation_id)
+        .order_by(ConversationMessage.sequence)
+    ).all()
+    
+    # 증상 키워드와 연관 질환 매핑 (샘플 데이터)
+    symptom_disease_map = {
+        "두통": ["편두통", "긴장성 두통", "군발성 두통"],
+        "복통": ["위염", "장염", "과민성 대장 증후군"],
+        "열": ["감기", "독감", "코로나19"],
+        "기침": ["감기", "기관지염", "코로나19"],
+        "어지러움": ["빈혈", "현기증", "저혈압"],
+        "피로": ["만성피로증후군", "빈혈", "갑상선 기능 저하증"],
+        "메스꺼움": ["위염", "멀미", "편두통"],
+        "설사": ["장염", "과민성 대장 증후군", "식중독"],
+        "근육통": ["근육염", "독감", "섬유근육통"],
+        "발열": ["감기", "독감", "폐렴"],
+        "인후통": ["인두염", "편도염", "후두염"],
+        "콧물": ["비염", "감기", "알레르기"],
+        "발진": ["알레르기", "습진", "수두"],
+        "관절통": ["관절염", "류마티스 관절염", "통풍"]
+    }
+    
+    # 대화에서 언급된 증상들 추출
+    detected_symptoms = set()
+    for message in messages:
+        message_content = message.content.lower()
+        for symptom in symptom_disease_map.keys():
+            if symptom in message_content:
+                detected_symptoms.add(symptom)
+    
+    # 증상에 따른 가능한 질환들 추출
+    possible_diseases = set()
+    for symptom in detected_symptoms:
+        possible_diseases.update(symptom_disease_map.get(symptom, []))
+    
+    # 질환이 발견되지 않았을 경우 기본값 추가
+    if not possible_diseases:
+        possible_diseases.add("특별한 질환이 감지되지 않음")
+    
+    return list(possible_diseases)
+
+
+# 대화 및 질환 분석 결과로 리포트 내용 생성
+def generate_conversation_report(conversation_id: uuid.UUID, diseases: list[str], session: Session) -> str:
+    """대화 내용과 분석된 질환을 바탕으로 건강 분석 리포트를 생성합니다."""
+    # 대화에서 사용자 정보 가져오기
+    conversation = session.get(Conversation, conversation_id)
+    user = session.get(User, conversation.user_id)
+    
+    # 사용자 기본 정보 수집
+    user_info = f"사용자: {user.nickname if user.nickname else '이름 없음'}\n"
+    user_info += f"연령대: {user.age_range if user.age_range else '정보 없음'}\n"
+    user_info += f"성별: {user.gender if user.gender else '정보 없음'}\n"
+    
+    # 평소 앓는 질환 정보
+    existing_illness = "없음"
+    if user.usual_illness and len(user.usual_illness) > 0:
+        existing_illness = ", ".join(user.usual_illness)
+    
+    # 증상 분석 및 추천 사항
+    disease_analysis = "## 분석된 가능성 있는 질환\n\n"
+    for disease in diseases:
+        disease_analysis += f"- {disease}\n"
+    
+    # 일반적인 건강 조언
+    health_advice = """
+## 건강 관리 조언
+
+1. 충분한 휴식과 수면을 취하세요.
+2. 물을 충분히 마시고 균형 잡힌 식사를 하세요.
+3. 규칙적인 운동을 통해 신체 건강을 유지하세요.
+4. 스트레스를 관리하고 정신 건강을 돌보세요.
+5. 필요한 경우 의료 전문가와 상담하세요.
+"""
+    
+    # 최종 리포트 작성
+    report = f"""# 건강 분석 리포트
+
+## 사용자 정보
+{user_info}
+평소 앓는 질환: {existing_illness}
+
+## 대화 내용 분석
+대화 내용을 바탕으로 분석한 결과입니다.
+
+{disease_analysis}
+
+{health_advice}
+
+*참고: 이 리포트는 자동으로 생성된 것으로, 정확한 진단을 위해서는 의사와 상담하세요.*
+
+생성 시간: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+"""
+    
+    return report
 
 
 if __name__ == "__main__":
