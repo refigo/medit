@@ -8,14 +8,13 @@ from app.database import get_session, create_db_and_tables
 from app.models import (
     User, UserCreate, UserRead, UserUpdate,
     FamilyMember, FamilyMemberCreate, FamilyMemberRead,
-    UserContact, UserContactCreate, UserContactRead,
-    ContactUserInfo,
+    UserContact, UserContactCreate, UserContactRead, ContactUserInfo,
     Conversation, ConversationCreate, ConversationRead,
     ConversationMessage, ConversationMessageCreate, ConversationMessageRead,
     ConversationReport, ConversationReportCreate, ConversationReportRead,
     Disease, DiseaseCreate, DiseaseRead,
     UserDisease, UserDiseaseCreate, UserDiseaseRead,
-    ConversationWithMessages, MessageWithResponse
+    ConversationWithMessage, MessageWithResponse
 )
 from app.config import settings
 
@@ -304,7 +303,7 @@ def read_user_contacts(
 
 
 # Conversation endpoints
-@app.post("/users/{login_id}/conversations/", response_model=ConversationWithMessages, tags=["Conversations"], summary="대화 생성")
+@app.post("/users/{login_id}/conversations/", response_model=ConversationWithMessage, tags=["Conversations"], summary="대화 생성")
 def create_conversation(
     login_id: str = Path(..., description="사용자의 로그인 아이디"),
     conversation: ConversationCreate = ...,
@@ -335,8 +334,8 @@ def create_conversation(
     session.refresh(db_conversation)
     
     # 결과 객체 준비
-    result = ConversationWithMessages.from_orm(db_conversation)
-    result.messages = []
+    result = ConversationWithMessage.from_orm(db_conversation)
+    result.conversation_message = None
     
     # 사용자가 메시지를 보낸 경우
     if conversation.message_content:
@@ -377,10 +376,7 @@ def create_conversation(
         
         # 결과에 메시지 추가
         result.title = db_conversation.title
-        result.messages = [
-            ConversationMessageRead.from_orm(db_message),
-            ConversationMessageRead.from_orm(ai_message)
-        ]
+        result.conversation_message = ConversationMessageRead.from_orm(ai_message)
     
     # 사용자가 메시지를 보내지 않은 경우, AI가 먼저 인사
     else:
@@ -406,7 +402,7 @@ def create_conversation(
         
         # 결과에 메시지 추가
         result.title = db_conversation.title
-        result.messages = [ConversationMessageRead.from_orm(ai_message)]
+        result.conversation_message = ConversationMessageRead.from_orm(ai_message)
     
     return result
 
@@ -457,73 +453,80 @@ def read_conversation(
     return conversation
 
 
-@app.post("/conversations/{conversation_id}/messages/", response_model=MessageWithResponse, tags=["Conversation Messages"], summary="대화 메시지 추가")
+@app.post("/users/{login_id}/conversations/{conversation_id}/messages/", response_model=MessageWithResponse, tags=["Conversation Messages"], summary="대화 메시지 추가")
 def create_conversation_message(
-    conversation_id: uuid.UUID = Path(..., description="대화의 ID"),
+    login_id: str = Path(..., description="사용자의 로그인 아이디"),
+    conversation_id: uuid.UUID = Path(..., description="대화 ID"),
     message: ConversationMessageCreate = ...,
     session: Session = Depends(get_session)
 ):
     """
     대화에 새 메시지를 추가합니다. 사용자가 메시지를 보내면 자동으로 AI 응답도 생성됩니다.
     
+    - **login_id**: 사용자의 로그인 아이디
     - **conversation_id**: 대화의 ID
     - **sender**: 메시지 발신자 ('user' 또는 'ai assistant')
     - **content**: 메시지 내용
     
     반환값은 사용자가 보낸 메시지와 AI의 응답 메시지를 포함한 단일 객체입니다.
     """
-    # 대화 존재 여부 확인
-    conversation = session.get(Conversation, conversation_id)
+    # 사용자 확인
+    user = session.exec(select(User).where(User.login_id == login_id)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # 대화 확인
+    conversation = session.exec(
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == user.id
+        )
+    ).first()
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
     
-    # 사용자가 보낸 메시지가 아닌 경우 예외 처리
-    if message.sender != "user":
-        raise HTTPException(status_code=400, detail="Only user messages can be sent")
-    
-    # 현재 대화의 마지막 메시지 순서 조회
-    latest_message = session.exec(
+    # 마지막 메시지 시퀀스 확인
+    last_message = session.exec(
         select(ConversationMessage)
         .where(ConversationMessage.conversation_id == conversation_id)
         .order_by(ConversationMessage.sequence.desc())
         .limit(1)
     ).first()
     
-    # 다음 순서 계산 (기존 메시지가 있으면 +1, 없으면 1부터 시작)
     next_sequence = 1
-    if latest_message:
-        next_sequence = latest_message.sequence + 1
+    if last_message:
+        next_sequence = last_message.sequence + 1
     
-    # 메시지 생성 (sequence는 자동 계산)
-    message_data = message.dict(exclude={"sequence"})
-    db_message = ConversationMessage(
-        **message_data,
+    # 사용자 메시지 저장
+    user_message = ConversationMessage(
         conversation_id=conversation_id,
+        sender="user",
+        content=message.content,
         sequence=next_sequence
     )
-    session.add(db_message)
+    session.add(user_message)
     session.commit()
-    session.refresh(db_message)
+    session.refresh(user_message)
     
-    # AI 응답 메시지 생성
-    # 현재는 단순한 응답을 생성하지만, 추후 생성형 AI로 대체 가능
-    response_text = generate_ai_response(db_message.content)
+    # AI 응답 생성
+    ai_response_text = generate_ai_response(message.content)
     
+    # AI 응답 저장
     ai_message = ConversationMessage(
         conversation_id=conversation_id,
         sender="ai assistant",
-        content=response_text,
-        sequence=next_sequence + 1  # 사용자 메시지 다음 순서
+        content=ai_response_text,
+        sequence=next_sequence + 1
     )
     
     session.add(ai_message)
     session.commit()
     session.refresh(ai_message)
     
-    # 통합된 응답 객체 생성
+    # 응답 구성
     result = MessageWithResponse(
-        user_message=ConversationMessageRead.from_orm(db_message),
-        ai_response=ConversationMessageRead.from_orm(ai_message)
+        user_message=ConversationMessageRead.from_orm(user_message),
+        conversation_message=ConversationMessageRead.from_orm(ai_message)
     )
     
     return result

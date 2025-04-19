@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlmodel import Field, SQLModel, Relationship
 import uuid
 from sqlalchemy import Column, String, ARRAY, Integer, Text
+from pydantic import BaseModel
 
 
 class UserBase(SQLModel):
@@ -292,10 +293,11 @@ class UserDiseaseRead(UserDiseaseBase):
 
 
 # 대화 응답 통합 모델
-class ConversationWithMessages(ConversationRead):
-    conversation_message: ConversationMessageRead
+class ConversationWithMessage(ConversationRead):
+    conversation_message: Optional[ConversationMessageRead] = None
 
 
 # 메시지 응답 통합 모델
-class MessageWithResponse(SQLModel):
+class MessageWithResponse(BaseModel):
+    user_message: ConversationMessageRead
     conversation_message: ConversationMessageRead
