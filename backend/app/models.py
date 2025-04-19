@@ -263,3 +263,20 @@ class MessageWithResponse(BaseModel):
     user_message: ConversationMessageRead
     conversation_message: ConversationMessageRead
     generated_report: Optional[ConversationReportRead] = None
+
+
+# 메딧 달력 응답 모델
+class CalendarReportItem(BaseModel):
+    report_id: uuid.UUID
+    conversation_id: uuid.UUID
+    title: str
+    summary: Optional[str]
+    created_at: datetime
+    severity_level: str
+    day: int  # 일자 (1-31)
+
+
+class MeditCalendarResponse(BaseModel):
+    year: int
+    month: int
+    reports: List[CalendarReportItem]

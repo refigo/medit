@@ -16,7 +16,8 @@ from app.models import (
     ConversationMessage, ConversationMessageCreate, ConversationMessageRead,
     ConversationReport, ConversationReportCreate, ConversationReportRead,
     Disease, DiseaseCreate, DiseaseRead,
-    ConversationWithMessage, MessageWithResponse
+    ConversationWithMessage, MessageWithResponse,
+    MeditCalendarResponse, CalendarReportItem
 )
 from app.config import settings
 from app.ai_assistant import (
@@ -1050,6 +1051,82 @@ def read_user_reports(
     ).all()
     
     return reports
+
+
+@app.get("/users/{login_id}/calendar/{year}/{month}/reports", response_model=MeditCalendarResponse, tags=["Calendar"], summary="메딧 달력 - 월별 리포트 조회")
+async def get_calendar_reports(
+    login_id: str = Path(..., description="사용자의 로그인 아이디"),
+    year: int = Path(..., description="조회할 연도"),
+    month: int = Path(..., ge=1, le=12, description="조회할 월 (1-12)"),
+    session: Session = Depends(get_session)
+):
+    """
+    특정 사용자의 특정 월에 생성된 건강 리포트를 조회합니다.
+    
+    - **login_id**: 사용자의 로그인 아이디
+    - **year**: 조회할 연도
+    - **month**: 조회할 월 (1-12)
+    """
+    # 사용자 존재 여부 확인
+    user = session.exec(select(User).where(User.login_id == login_id)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail=f"사용자 ID {login_id}를 찾을 수 없습니다.")
+        
+    # 월의 시작일과 끝일 계산
+    if month == 12:
+        next_year = year + 1
+        next_month = 1
+    else:
+        next_year = year
+        next_month = month + 1
+        
+    start_date = datetime(year, month, 1)
+    end_date = datetime(next_year, next_month, 1)
+    
+    # 특정 사용자의 대화 목록 조회
+    conversations = session.exec(
+        select(Conversation).where(Conversation.user_id == user.id)
+    ).all()
+    
+    conversation_ids = [conv.id for conv in conversations]
+    
+    if not conversation_ids:
+        # 대화가 없는 경우 빈 결과 반환
+        return MeditCalendarResponse(
+            year=year,
+            month=month,
+            reports=[]
+        )
+    
+    # 해당 기간의 리포트 조회
+    reports = session.exec(
+        select(ConversationReport).where(
+            ConversationReport.conversation_id.in_(conversation_ids),
+            ConversationReport.created_at >= start_date,
+            ConversationReport.created_at < end_date
+        ).order_by(ConversationReport.created_at)
+    ).all()
+    
+    # 응답 데이터 구성
+    calendar_items = []
+    for report in reports:
+        calendar_items.append(
+            CalendarReportItem(
+                report_id=report.id,
+                conversation_id=report.conversation_id,
+                title=report.title,
+                summary=report.summary,
+                created_at=report.created_at,
+                severity_level=report.severity_level or "green",  # 기본값 설정
+                day=report.created_at.day  # 일자 추출
+            )
+        )
+    
+    return MeditCalendarResponse(
+        year=year,
+        month=month,
+        reports=calendar_items
+    )
 
 
 if __name__ == "__main__":
