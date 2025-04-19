@@ -14,7 +14,8 @@ from app.models import (
     ConversationMessage, ConversationMessageCreate, ConversationMessageRead,
     ConversationReport, ConversationReportCreate, ConversationReportRead,
     Disease, DiseaseCreate, DiseaseRead,
-    UserDisease, UserDiseaseCreate, UserDiseaseRead
+    UserDisease, UserDiseaseCreate, UserDiseaseRead,
+    ConversationWithMessages, MessageWithResponse
 )
 from app.config import settings
 
@@ -273,7 +274,7 @@ def read_user_contacts(
 
 
 # Conversation endpoints
-@app.post("/users/{login_id}/conversations/", response_model=ConversationRead, tags=["Conversations"], summary="대화 생성")
+@app.post("/users/{login_id}/conversations/", response_model=ConversationWithMessages, tags=["Conversations"], summary="대화 생성")
 def create_conversation(
     login_id: str = Path(..., description="사용자의 로그인 아이디"),
     conversation: ConversationCreate = ...,
@@ -284,7 +285,9 @@ def create_conversation(
     
     - **login_id**: 사용자의 로그인 아이디
     - **title**: 대화 제목 (선택 사항, 없으면 자동 생성될 수 있음)
-    - **message_content**: 첫 메시지 내용 (선택 사항, 없으면 메시지 생성 안 함)
+    - **message_content**: 첫 메시지 내용 (선택 사항, 없으면 AI가 먼저 인사)
+    
+    반환값은 생성된 대화와 시작 메시지(들)를 포함합니다.
     """
     # 사용자 존재 여부 확인
     user = session.exec(select(User).where(User.login_id == login_id)).first()
@@ -301,19 +304,81 @@ def create_conversation(
     session.commit()
     session.refresh(db_conversation)
     
-    # 선택적으로 첫 메시지 생성
+    # 결과 객체 준비
+    result = ConversationWithMessages.from_orm(db_conversation)
+    result.messages = []
+    
+    # 사용자가 메시지를 보낸 경우
     if conversation.message_content:
-        # 메시지 생성 (사용자가 보낸 첫 번째 메시지)
+        # 사용자 메시지 생성 (첫 번째 메시지)
         db_message = ConversationMessage(
             conversation_id=db_conversation.id,
             sender="user",
             content=conversation.message_content,
-            sequence=1  # 첫 번째 메시지
+            sequence=1  # 첫 번째 메시지는 항상 1
         )
         session.add(db_message)
         session.commit()
+        session.refresh(db_message)
+        
+        # AI 응답 메시지 생성
+        response_text = generate_ai_response(conversation.message_content)
+        ai_message = ConversationMessage(
+            conversation_id=db_conversation.id,
+            sender="ai assistant",
+            content=response_text,
+            sequence=2  # 두 번째 메시지 (AI 응답)
+        )
+        session.add(ai_message)
+        session.commit()
+        session.refresh(ai_message)
+        
+        # 대화 제목이 없는 경우, 첫 메시지 기반으로 제목 자동 생성
+        if not db_conversation.title:
+            # 메시지 길이에 따라 일부만 사용하거나 전체 사용
+            title_base = conversation.message_content
+            if len(title_base) > 30:
+                title_base = title_base[:27] + "..."
+            
+            db_conversation.title = title_base
+            session.add(db_conversation)
+            session.commit()
+            session.refresh(db_conversation)
+        
+        # 결과에 메시지 추가
+        result.title = db_conversation.title
+        result.messages = [
+            ConversationMessageRead.from_orm(db_message),
+            ConversationMessageRead.from_orm(ai_message)
+        ]
     
-    return db_conversation
+    # 사용자가 메시지를 보내지 않은 경우, AI가 먼저 인사
+    else:
+        # 사용자 정보를 기반으로 맞춤형 인사말 생성
+        greeting_text = generate_ai_greeting(user)
+        
+        ai_message = ConversationMessage(
+            conversation_id=db_conversation.id,
+            sender="ai assistant",
+            content=greeting_text,
+            sequence=1  # 첫 번째 메시지 (AI 인사)
+        )
+        session.add(ai_message)
+        session.commit()
+        session.refresh(ai_message)
+        
+        # 대화 제목이 없는 경우 기본 제목 설정
+        if not db_conversation.title:
+            db_conversation.title = "메디트 상담"
+            session.add(db_conversation)
+            session.commit()
+            session.refresh(db_conversation)
+        
+        # 결과에 메시지 추가
+        result.title = db_conversation.title
+        result.messages = [ConversationMessageRead.from_orm(ai_message)]
+    
+    return result
 
 
 @app.get("/users/{login_id}/conversations/", response_model=list[ConversationRead], tags=["Conversations"], summary="대화 목록 조회")
@@ -362,34 +427,76 @@ def read_conversation(
     return conversation
 
 
-@app.post("/conversations/{conversation_id}/messages/", response_model=ConversationMessageRead, tags=["Conversation Messages"], summary="대화 메시지 추가")
+@app.post("/conversations/{conversation_id}/messages/", response_model=MessageWithResponse, tags=["Conversation Messages"], summary="대화 메시지 추가")
 def create_conversation_message(
     conversation_id: uuid.UUID = Path(..., description="대화의 ID"),
     message: ConversationMessageCreate = ...,
     session: Session = Depends(get_session)
 ):
     """
-    대화에 새 메시지를 추가합니다.
+    대화에 새 메시지를 추가합니다. 사용자가 메시지를 보내면 자동으로 AI 응답도 생성됩니다.
     
     - **conversation_id**: 대화의 ID
     - **sender**: 메시지 발신자 ('user' 또는 'ai assistant')
     - **content**: 메시지 내용
-    - **sequence**: 대화 내 메시지 순서
+    
+    반환값은 사용자가 보낸 메시지와 AI의 응답 메시지를 포함한 단일 객체입니다.
     """
     # 대화 존재 여부 확인
     conversation = session.get(Conversation, conversation_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
     
-    # 메시지 생성
+    # 사용자가 보낸 메시지가 아닌 경우 예외 처리
+    if message.sender != "user":
+        raise HTTPException(status_code=400, detail="Only user messages can be sent")
+    
+    # 현재 대화의 마지막 메시지 순서 조회
+    latest_message = session.exec(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == conversation_id)
+        .order_by(ConversationMessage.sequence.desc())
+        .limit(1)
+    ).first()
+    
+    # 다음 순서 계산 (기존 메시지가 있으면 +1, 없으면 1부터 시작)
+    next_sequence = 1
+    if latest_message:
+        next_sequence = latest_message.sequence + 1
+    
+    # 메시지 생성 (sequence는 자동 계산)
+    message_data = message.dict(exclude={"sequence"})
     db_message = ConversationMessage(
-        **message.dict(),
-        conversation_id=conversation_id
+        **message_data,
+        conversation_id=conversation_id,
+        sequence=next_sequence
     )
     session.add(db_message)
     session.commit()
     session.refresh(db_message)
-    return db_message
+    
+    # AI 응답 메시지 생성
+    # 현재는 단순한 응답을 생성하지만, 추후 생성형 AI로 대체 가능
+    response_text = generate_ai_response(db_message.content)
+    
+    ai_message = ConversationMessage(
+        conversation_id=conversation_id,
+        sender="ai assistant",
+        content=response_text,
+        sequence=next_sequence + 1  # 사용자 메시지 다음 순서
+    )
+    
+    session.add(ai_message)
+    session.commit()
+    session.refresh(ai_message)
+    
+    # 통합된 응답 객체 생성
+    result = MessageWithResponse(
+        user_message=ConversationMessageRead.from_orm(db_message),
+        ai_response=ConversationMessageRead.from_orm(ai_message)
+    )
+    
+    return result
 
 
 @app.get("/conversations/{conversation_id}/messages/", response_model=list[ConversationMessageRead], tags=["Conversation Messages"], summary="대화 메시지 목록 조회")
@@ -633,6 +740,86 @@ def read_user_diseases(
         results.append(result)
     
     return results
+
+
+# AI 응답 생성 함수 (임시)
+def generate_ai_response(user_message: str) -> str:
+    """
+    사용자 메시지에 대한 AI 응답을 생성합니다.
+    현재는 간단한 규칙 기반 응답을 생성하지만, 추후 생성형 AI로 대체될 예정입니다.
+    
+    Args:
+        user_message: 사용자가 보낸 메시지 내용
+        
+    Returns:
+        AI 응답 메시지
+    """
+    # 사용자 메시지에 특정 키워드가 포함되어 있는지 확인하여 간단한 응답 생성
+    user_message_lower = user_message.lower()
+    
+    if "안녕" in user_message_lower or "hello" in user_message_lower:
+        return "안녕하세요! 메디트 AI 어시스턴트입니다. 어떻게 도와드릴까요?"
+    
+    elif "머리" in user_message_lower and ("아프" in user_message_lower or "두통" in user_message_lower):
+        return "두통을 경험하고 계시는군요. 두통의 강도와 지속 시간, 다른 증상도 있는지 알려주시면 더 정확한 도움을 드릴 수 있습니다."
+    
+    elif "배" in user_message_lower and ("아프" in user_message_lower or "통증" in user_message_lower):
+        return "복통이 있으신가요? 어느 부위에 통증이 있고, 언제부터 시작되었는지, 식사와 관련이 있는지 알려주시면 도움이 될 것 같습니다."
+    
+    elif "감기" in user_message_lower or "콧물" in user_message_lower or "기침" in user_message_lower:
+        return "감기 증상이 있으신 것 같네요. 체온, 기침, 콧물 등의 구체적인 증상과 지속 기간을 알려주시면 더 자세한 정보를 제공해 드릴 수 있습니다."
+    
+    elif "처방" in user_message_lower or "약" in user_message_lower:
+        return "특정 약물에 대해 문의하시는 것 같습니다. 다만, 온라인에서 처방을 제공할 수 없으니 가까운 의료기관에 방문하시는 것을 권장합니다."
+    
+    elif "고마워" in user_message_lower or "감사" in user_message_lower:
+        return "도움이 되어 기쁩니다. 다른 질문이 있으시면 언제든지 물어보세요!"
+    
+    elif "질병" in user_message_lower or "병" in user_message_lower:
+        return "특정 질병에 대해 궁금하신가요? 어떤 질병에 대해 알고 싶으신지, 더 구체적으로 말씀해 주시면 관련 정보를 제공해 드리겠습니다."
+    
+    else:
+        return "말씀하신 내용에 대해 더 자세히 알려주시겠어요? 건강 상태나 증상에 대해 구체적으로 설명해 주시면 더 정확한 정보를 제공해 드릴 수 있습니다."
+
+
+# 사용자 정보를 기반으로 인사말 생성
+def generate_ai_greeting(user: User) -> str:
+    """
+    사용자 정보를 기반으로 AI의 첫 인사말을 생성합니다.
+    
+    Args:
+        user: 대화를 시작한 사용자 객체
+        
+    Returns:
+        사용자 맞춤형 인사말
+    """
+    # 시간대에 따른 인사말
+    from datetime import datetime
+    current_hour = datetime.utcnow().hour
+    
+    time_greeting = "안녕하세요"
+    if 5 <= current_hour < 12:
+        time_greeting = "좋은 아침이에요"
+    elif 12 <= current_hour < 18:
+        time_greeting = "안녕하세요"
+    elif 18 <= current_hour < 22:
+        time_greeting = "좋은 저녁이에요"
+    else:
+        time_greeting = "늦은 시간에도 찾아주셨네요"
+    
+    # 사용자 이름을 포함한 인사말
+    name_greeting = f"{user.nickname}님, {time_greeting}! 메디트 AI 어시스턴트입니다."
+    
+    # 기본 인사말
+    base_greeting = "건강 관련 궁금한 점이 있으신가요? 어떻게 도와드릴까요?"
+    
+    # 사용자의 평소 질환이 있는 경우, 그에 맞는 인사말 추가
+    health_greeting = ""
+    if user.usual_illness and len(user.usual_illness) > 0:
+        health_greeting = f"\n평소 {', '.join(user.usual_illness)}으로 불편함을 겪고 계신 것으로 알고 있습니다. 오늘은 어떠신가요?"
+    
+    # 최종 인사말 조합
+    return f"{name_greeting}{health_greeting}\n\n{base_greeting}"
 
 
 if __name__ == "__main__":

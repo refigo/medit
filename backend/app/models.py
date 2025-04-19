@@ -166,7 +166,6 @@ class ConversationRead(ConversationBase):
 class ConversationMessageBase(SQLModel):
     sender: str  # 'user' | 'ai assistant'
     content: str = Field(sa_column=Column(Text))
-    sequence: int
 
 
 class ConversationMessage(ConversationMessageBase, table=True):
@@ -178,6 +177,7 @@ class ConversationMessage(ConversationMessageBase, table=True):
         index=True,
     )
     conversation_id: uuid.UUID = Field(foreign_key="conversations.id")
+    sequence: int  # 대화 내 메시지 순서
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
     # 관계 설정
@@ -192,6 +192,7 @@ class ConversationMessageRead(ConversationMessageBase):
     id: uuid.UUID
     conversation_id: uuid.UUID
     created_at: datetime
+    sequence: int
 
 
 class ConversationReportBase(SQLModel):
@@ -281,3 +282,13 @@ class UserDiseaseRead(UserDiseaseBase):
     disease_id: int
     created_at: datetime
     disease: Optional[DiseaseRead] = None
+
+
+# 대화 응답 통합 모델
+class ConversationWithMessages(ConversationRead):
+    conversation_message: ConversationMessageRead
+
+
+# 메시지 응답 통합 모델
+class MessageWithResponse(SQLModel):
+    conversation_message: ConversationMessageRead
