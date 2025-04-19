@@ -6,7 +6,7 @@ from typing import Optional, List
 
 from app.database import get_session, create_db_and_tables
 from app.models import (
-    User, UserCreate, UserRead,
+    User, UserCreate, UserRead, UserUpdate,
     FamilyMember, FamilyMemberCreate, FamilyMemberRead,
     UserContact, UserContactCreate, UserContactRead,
     ContactUserInfo,
@@ -99,6 +99,36 @@ def read_user_by_login_id(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
+
+
+@app.patch("/users/{login_id}", response_model=UserRead, tags=["Users"], summary="사용자 정보 업데이트")
+def update_user(
+    login_id: str = Path(..., description="업데이트할 사용자의 로그인 아이디"),
+    user_update: UserUpdate = ...,
+    session: Session = Depends(get_session)
+):
+    """
+    사용자 정보를 부분적으로 업데이트합니다.
+    
+    - **login_id**: 업데이트할 사용자의 로그인 아이디
+    - **nickname**: 사용자 별명 (변경하지 않을 경우 제외)
+    - **age_range**: 연령대 (변경하지 않을 경우 제외)
+    - **gender**: 성별 (변경하지 않을 경우 제외)
+    - **usual_illness**: 평소 앓는 질환 목록 (변경하지 않을 경우 제외)
+    """
+    db_user = session.exec(select(User).where(User.login_id == login_id)).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # 변경할 정보가 있는 경우에만 업데이트
+    user_data = user_update.dict(exclude_unset=True)
+    for key, value in user_data.items():
+        setattr(db_user, key, value)
+    
+    session.add(db_user)
+    session.commit()
+    session.refresh(db_user)
+    return db_user
 
 
 @app.get("/users/uuid/{user_id}", response_model=UserRead, tags=["Users"], summary="UUID로 사용자 조회")

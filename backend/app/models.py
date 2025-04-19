@@ -49,6 +49,13 @@ class UserRead(UserBase):
     usual_illness: Optional[List[str]] = None
 
 
+class UserUpdate(SQLModel):
+    nickname: Optional[str] = None
+    age_range: Optional[str] = None
+    gender: Optional[str] = None
+    usual_illness: Optional[List[str]] = None
+
+
 class FamilyMemberBase(SQLModel):
     nickname: str
     relation: Optional[str] = None
