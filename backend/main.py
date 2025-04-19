@@ -61,16 +61,16 @@ def read_users(
     return users
 
 
-@app.get("/users/by-login-id/{login_id}", response_model=UserRead)
-def read_user_by_login_id(login_id: str, session: Session = Depends(get_session)):
+@app.get("/users/{login_id}", response_model=UserRead)
+def read_user(login_id: str, session: Session = Depends(get_session)):
     user = session.exec(select(User).where(User.login_id == login_id)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
 
-@app.get("/users/by-id/{user_id}", response_model=UserRead)
-def read_user(user_id: uuid.UUID, session: Session = Depends(get_session)):
+@app.get("/users/uuid/{user_id}", response_model=UserRead)
+def read_user_by_uuid(user_id: uuid.UUID, session: Session = Depends(get_session)):
     user = session.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -78,7 +78,7 @@ def read_user(user_id: uuid.UUID, session: Session = Depends(get_session)):
 
 
 # Family Member endpoints
-@app.post("/users/by-login-id/{login_id}/family-members/", response_model=FamilyMemberRead)
+@app.post("/users/{login_id}/family-members/", response_model=FamilyMemberRead)
 def create_family_member(
     login_id: str,
     family_member: FamilyMemberCreate,
@@ -100,7 +100,7 @@ def create_family_member(
     return db_family_member
 
 
-@app.get("/users/by-login-id/{login_id}/family-members/", response_model=list[FamilyMemberRead])
+@app.get("/users/{login_id}/family-members/", response_model=list[FamilyMemberRead])
 def read_family_members(
     login_id: str,
     session: Session = Depends(get_session),
@@ -134,7 +134,7 @@ def read_family_member(
 
 
 # User Contact endpoints
-@app.post("/users/by-login-id/{login_id}/contacts/", response_model=UserContactRead)
+@app.post("/users/{login_id}/contacts/", response_model=UserContactRead)
 def create_user_contact(
     login_id: str,
     contact: UserContactCreate,
@@ -163,7 +163,7 @@ def create_user_contact(
     return db_contact
 
 
-@app.get("/users/by-login-id/{login_id}/contacts/", response_model=list[UserContactRead])
+@app.get("/users/{login_id}/contacts/", response_model=list[UserContactRead])
 def read_user_contacts(
     login_id: str,
     session: Session = Depends(get_session),
