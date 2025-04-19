@@ -50,7 +50,7 @@ class UserRead(UserBase):
 class FamilyMemberBase(SQLModel):
     nickname: str
     relation: Optional[str] = None
-    birth_date: Optional[datetime] = None
+    age: int
 
 
 class FamilyMember(FamilyMemberBase, table=True):
@@ -62,18 +62,20 @@ class FamilyMember(FamilyMemberBase, table=True):
         index=True,
     )
     user_id: uuid.UUID = Field(foreign_key="users.id")
+    usual_illness: Optional[List[str]] = Field(sa_column=Column(ARRAY(String)), default=None)
     
     # 관계 설정
     user: User = Relationship(back_populates="family_members")
 
 
 class FamilyMemberCreate(FamilyMemberBase):
-    pass
+    usual_illness: Optional[List[str]] = None
 
 
 class FamilyMemberRead(FamilyMemberBase):
     id: uuid.UUID
     user_id: uuid.UUID
+    usual_illness: Optional[List[str]] = None
 
 
 class UserContactBase(SQLModel):

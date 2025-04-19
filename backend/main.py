@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, APIRouter, status, Query, Path
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 import uuid
@@ -30,14 +30,24 @@ def on_startup():
     print("Database tables created successfully")
 
 
-@app.get("/")
+@app.get("/", tags=["Root"])
 def read_root():
     return {"message": "Welcome to Medit API"}
 
 
 # User endpoints
-@app.post("/users/", response_model=UserRead)
+@app.post("/users/", response_model=UserRead, tags=["Users"], summary="사용자 생성")
 def create_user(user: UserCreate, session: Session = Depends(get_session)):
+    """
+    새로운 사용자를 생성합니다.
+    
+    - **login_id**: 로그인에 사용할 고유 아이디
+    - **nickname**: 사용자 별명
+    - **password**: 비밀번호 (현재는 평문 저장)
+    - **age_range**: 연령대 (예: "20-29")
+    - **gender**: 성별
+    - **usual_illness**: 평소 앓는 질환 목록
+    """
     db_user = User(
         login_id=user.login_id,
         nickname=user.nickname,
@@ -52,26 +62,48 @@ def create_user(user: UserCreate, session: Session = Depends(get_session)):
     return db_user
 
 
-@app.get("/users/", response_model=list[UserRead])
+@app.get("/users/", response_model=list[UserRead], tags=["Users"], summary="모든 사용자 조회")
 def read_users(
     session: Session = Depends(get_session),
     skip: int = 0,
     limit: int = 100
 ):
+    """
+    모든 사용자 목록을 조회합니다.
+    
+    - **skip**: 건너뛸 사용자 수
+    - **limit**: 최대 반환할 사용자 수
+    """
     users = session.exec(select(User).offset(skip).limit(limit)).all()
     return users
 
 
-@app.get("/users/{login_id}", response_model=UserRead)
-def read_user(login_id: str, session: Session = Depends(get_session)):
+@app.get("/users/{login_id}", response_model=UserRead, tags=["Users"], summary="로그인 아이디로 사용자 조회")
+def read_user_by_login_id(
+    login_id: str = Path(..., description="조회할 사용자의 로그인 아이디"),
+    session: Session = Depends(get_session)
+):
+    """
+    로그인 아이디로 특정 사용자를 조회합니다.
+    
+    - **login_id**: 조회할 사용자의 로그인 아이디
+    """
     user = session.exec(select(User).where(User.login_id == login_id)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
 
-@app.get("/users/uuid/{user_id}", response_model=UserRead)
-def read_user_by_uuid(user_id: uuid.UUID, session: Session = Depends(get_session)):
+@app.get("/users/uuid/{user_id}", response_model=UserRead, tags=["Users"], summary="UUID로 사용자 조회")
+def read_user_by_uuid(
+    user_id: uuid.UUID = Path(..., description="조회할 사용자의 UUID"),
+    session: Session = Depends(get_session)
+):
+    """
+    UUID로 특정 사용자를 조회합니다.
+    
+    - **user_id**: 조회할 사용자의 UUID
+    """
     user = session.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -79,12 +111,21 @@ def read_user_by_uuid(user_id: uuid.UUID, session: Session = Depends(get_session
 
 
 # Family Member endpoints
-@app.post("/users/{login_id}/family-members/", response_model=FamilyMemberRead)
+@app.post("/users/{login_id}/family-members/", response_model=FamilyMemberRead, tags=["Family Members"], summary="가족 구성원 추가")
 def create_family_member(
-    login_id: str,
-    family_member: FamilyMemberCreate,
+    login_id: str = Path(..., description="사용자의 로그인 아이디"),
+    family_member: FamilyMemberCreate = ...,
     session: Session = Depends(get_session)
 ):
+    """
+    사용자의 가족 구성원을 추가합니다.
+    
+    - **login_id**: 사용자의 로그인 아이디
+    - **nickname**: 가족 구성원 별명
+    - **relation**: 가족 관계 (예: "부모", "형제", "자녀")
+    - **age**: 가족 구성원의 나이
+    - **usual_illness**: 평소 앓는 질환 목록
+    """
     # 사용자 존재 여부 확인
     user = session.exec(select(User).where(User.login_id == login_id)).first()
     if not user:
@@ -101,13 +142,20 @@ def create_family_member(
     return db_family_member
 
 
-@app.get("/users/{login_id}/family-members/", response_model=list[FamilyMemberRead])
+@app.get("/users/{login_id}/family-members/", response_model=list[FamilyMemberRead], tags=["Family Members"], summary="가족 구성원 목록 조회")
 def read_family_members(
-    login_id: str,
+    login_id: str = Path(..., description="사용자의 로그인 아이디"),
     session: Session = Depends(get_session),
     skip: int = 0,
     limit: int = 100
 ):
+    """
+    사용자의 가족 구성원 목록을 조회합니다.
+    
+    - **login_id**: 사용자의 로그인 아이디
+    - **skip**: 건너뛸 가족 구성원 수
+    - **limit**: 최대 반환할 가족 구성원 수
+    """
     # 사용자 존재 여부 확인
     user = session.exec(select(User).where(User.login_id == login_id)).first()
     if not user:
@@ -123,24 +171,20 @@ def read_family_members(
     return family_members
 
 
-@app.get("/family-members/{family_member_id}", response_model=FamilyMemberRead)
-def read_family_member(
-    family_member_id: uuid.UUID,
-    session: Session = Depends(get_session)
-):
-    family_member = session.get(FamilyMember, family_member_id)
-    if not family_member:
-        raise HTTPException(status_code=404, detail="Family member not found")
-    return family_member
-
-
 # User Contact endpoints
-@app.post("/users/{login_id}/contacts/", response_model=UserContactRead)
+@app.post("/users/{login_id}/contacts/", response_model=UserContactRead, tags=["User Contacts"], summary="사용자 연락처 추가")
 def create_user_contact(
-    login_id: str,
-    contact: UserContactCreate,
+    login_id: str = Path(..., description="사용자의 로그인 아이디"),
+    contact: UserContactCreate = ...,
     session: Session = Depends(get_session)
 ):
+    """
+    사용자의 연락처를 추가합니다.
+    
+    - **login_id**: 사용자의 로그인 아이디
+    - **contact_login_id**: 추가할 연락처 사용자의 로그인 아이디
+    - **alias**: 연락처 별명 (선택 사항)
+    """
     print(f"user_id: {login_id}")
     # 사용자 존재 여부 확인
     user = session.exec(select(User).where(User.login_id == login_id)).first()
@@ -164,13 +208,22 @@ def create_user_contact(
     return db_contact
 
 
-@app.get("/users/{login_id}/contacts/", response_model=list[UserContactRead])
+@app.get("/users/{login_id}/contacts/", response_model=list[UserContactRead], tags=["User Contacts"], summary="사용자 연락처 목록 조회")
 def read_user_contacts(
-    login_id: str,
+    login_id: str = Path(..., description="사용자의 로그인 아이디"),
     session: Session = Depends(get_session),
     skip: int = 0,
     limit: int = 100
 ):
+    """
+    사용자의 연락처 목록을 조회합니다.
+    
+    - **login_id**: 사용자의 로그인 아이디
+    - **skip**: 건너뛸 연락처 수
+    - **limit**: 최대 반환할 연락처 수
+    
+    반환되는 데이터에는 연락처 사용자의 기본 정보(id, login_id, nickname, age_range, gender)도 포함됩니다.
+    """
     # 사용자 존재 여부 확인
     user = session.exec(select(User).where(User.login_id == login_id)).first()
     if not user:
