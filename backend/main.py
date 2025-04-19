@@ -513,19 +513,11 @@ def create_conversation_message(
     # AI 응답 생성
     ai_response_text = generate_ai_response(message.content)
     
-    # AI 응답 저장
-    ai_message = ConversationMessage(
-        conversation_id=conversation_id,
-        sender="ai assistant",
-        content=ai_response_text,
-        sequence=next_sequence + 1
-    )
-    session.add(ai_message)
-    session.commit()
-    session.refresh(ai_message)
+    # 대화 분석 및 자동 리포트 생성 조건 확인
+    generate_report = (next_sequence + 1 == 7)  # 3번 정도의 핑퐁 후 (ai: 1,3,5, user: 2,4,6)
     
-    # 대화 분석 및 자동 리포트 생성
-    if next_sequence + 1 == 7:  # 3번 정도의 핑퐁 후 (ai: 1,3,5, user: 2,4,6)
+    # 리포트 생성이 필요한 경우 응답 내용 수정
+    if generate_report:
         # 대화에서 증상 분석
         detected_diseases = analyze_conversation_for_diseases(conversation_id, session)
         
@@ -543,25 +535,38 @@ def create_conversation_message(
         session.commit()
         session.refresh(report)
         
+        # AI 응답을 리포트 관련 내용으로 변경
+        ai_response_text = f"""
+대화 내용을 분석한 결과, 다음과 같은 건강 상태가 감지되었습니다:
+
+{', '.join(detected_diseases)}
+
+자세한 분석 내용을 담은 건강 리포트를 생성했습니다. 리포트에서 더 상세한 정보와 건강 관리 조언을 확인하실 수 있습니다.
+
+이 분석은 대화 내용을 기반으로 한 참고 사항이며, 정확한 진단을 위해서는 의사와 상담하시기 바랍니다.
+"""
+    
+    # AI 응답 저장
+    ai_message = ConversationMessage(
+        conversation_id=conversation_id,
+        sender="ai assistant",
+        content=ai_response_text,
+        sequence=next_sequence + 1
+    )
+    session.add(ai_message)
+    session.commit()
+    session.refresh(ai_message)
+    
+    # 응답 구성
+    if generate_report:
         # 리포트 정보를 응답에 포함
         result = MessageWithResponse(
             user_message=ConversationMessageRead.from_orm(user_message),
             conversation_message=ConversationMessageRead.from_orm(ai_message),
             generated_report=ConversationReportRead.from_orm(report)
         )
-        
-        # AI가 리포트 생성 알림 메시지 전송
-        report_notification = ConversationMessage(
-            conversation_id=conversation_id,
-            sender="ai assistant",
-            content="대화 내용을 바탕으로 건강 분석 리포트를 생성했습니다. 리포트 탭에서 확인해주세요.",
-            sequence=next_sequence + 2
-        )
-        session.add(report_notification)
-        session.commit()
-    
     else:
-        # 응답 구성
+        # 일반 응답 구성
         result = MessageWithResponse(
             user_message=ConversationMessageRead.from_orm(user_message),
             conversation_message=ConversationMessageRead.from_orm(ai_message)
