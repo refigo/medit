@@ -19,8 +19,10 @@ from app.models import (
 )
 from app.config import settings
 from app.ai_assistant import (
-    generate_ai_response, generate_ai_greeting,
-    analyze_conversation_for_diseases, generate_conversation_report
+    generate_ai_response_sync as generate_ai_response,
+    generate_ai_greeting_sync as generate_ai_greeting,
+    analyze_conversation_for_diseases_sync as analyze_conversation_for_diseases,
+    generate_conversation_report_sync as generate_conversation_report
 )
 
 app = FastAPI(title="Medit API")

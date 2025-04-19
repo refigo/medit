@@ -1,11 +1,42 @@
 from typing import List, Dict, Any, Set
 from sqlmodel import Session, select
 import uuid
+import asyncio
 from datetime import datetime
 
 from app.models import (
     User, Conversation, ConversationMessage, Disease
 )
+from app.config import settings
+from app.llm.factory import LLMServiceFactory
+from app.llm.base import LLMService
+
+# LLM 서비스 초기화 함수
+def get_llm_service() -> LLMService:
+    """
+    설정에 따라 적절한 LLM 서비스 인스턴스를 반환합니다.
+    
+    Returns:
+        LLMService: 구성된 LLM 서비스 인스턴스
+    """
+    provider = settings.LLM_PROVIDER.lower()
+    
+    if provider == "openai":
+        config = {
+            "api_key": settings.OPENAI_API_KEY,
+            "model": settings.OPENAI_MODEL
+        }
+    elif provider == "bedrock":
+        config = {
+            "aws_access_key_id": settings.AWS_ACCESS_KEY_ID,
+            "aws_secret_access_key": settings.AWS_SECRET_ACCESS_KEY,
+            "region_name": settings.AWS_REGION,
+            "model_id": settings.BEDROCK_MODEL_ID
+        }
+    else:
+        raise ValueError(f"지원되지 않는 LLM 제공자: {provider}")
+    
+    return LLMServiceFactory.create(provider, config)
 
 # 질병 및 증상 관련 샘플 데이터
 # 실제 프로덕션에서는 외부 의료 API/데이터베이스와 연동이 필요할 수 있습니다
@@ -63,11 +94,11 @@ general_suggestions = [
 ]
 
 
-# AI 응답 생성 함수 (임시)
-def generate_ai_response(user_message: str) -> str:
+# AI 응답 생성 함수
+async def generate_ai_response(user_message: str) -> str:
     """
     사용자 메시지에 대한 AI 응답을 생성합니다.
-    현재는 간단한 규칙 기반 응답을 생성하지만, 추후 생성형 AI로 대체될 예정입니다.
+    LLM 서비스를 사용하여 자연스러운 응답을 생성합니다.
     
     Args:
         user_message: 사용자가 보낸 메시지 내용
@@ -75,7 +106,39 @@ def generate_ai_response(user_message: str) -> str:
     Returns:
         AI 응답 메시지
     """
-    # 간단한 규칙 기반 응답 (실제로는 LLM 모델 등으로 대체 예정)
+    try:
+        # LLM 서비스 가져오기
+        llm_service = get_llm_service()
+        
+        # 프롬프트 구성
+        system_message = """
+        당신은 건강 상담을 전문으로 하는 AI 의료 어시스턴트입니다.
+        사용자의 건강 관련 질문에 친절하고 도움이 되는 정보를 제공하세요.
+        의학적 조언을 제공할 때는 항상 전문의와 상담을 권장하세요.
+        실제 진단이나 치료를 제시하지 않도록 주의하세요.
+        """
+        
+        # 채팅 메시지 구성
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message}
+        ]
+        
+        # LLM 서비스를 통해 응답 생성
+        response = await llm_service.generate_chat(messages)
+        return response
+        
+    except Exception as e:
+        print(f"LLM 서비스 오류: {str(e)}")
+        # 오류 발생 시 기본 응답 제공 (기존 규칙 기반 응답 사용)
+        return fallback_generate_response(user_message)
+
+
+# 기존 규칙 기반 응답 생성 함수 (LLM 서비스 실패 시 대비책)
+def fallback_generate_response(user_message: str) -> str:
+    """
+    LLM 서비스 실패 시 사용할 기본 규칙 기반 응답 생성 함수
+    """
     user_message_lower = user_message.lower()
     
     # 인사말 감지
@@ -106,8 +169,21 @@ def generate_ai_response(user_message: str) -> str:
     return "말씀해주신 내용에 대해 더 자세히 알려주시면 더 정확한 정보와 도움을 드릴 수 있습니다. 건강 상태나 특정 증상에 대해 구체적으로 말씀해주세요."
 
 
+# 동기 버전의 응답 생성 함수 (기존 코드와의 호환성 유지)
+def generate_ai_response_sync(user_message: str) -> str:
+    """
+    generate_ai_response의 동기 버전 (기존 코드와의 호환성 유지)
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(generate_ai_response(user_message))
+    finally:
+        loop.close()
+
+
 # 사용자 정보를 기반으로 인사말 생성
-def generate_ai_greeting(user: User) -> str:
+async def generate_ai_greeting(user: User) -> str:
     """
     사용자 정보를 기반으로 AI의 첫 인사말을 생성합니다.
     
@@ -116,6 +192,57 @@ def generate_ai_greeting(user: User) -> str:
         
     Returns:
         사용자 맞춤형 인사말
+    """
+    try:
+        # LLM 서비스 가져오기
+        llm_service = get_llm_service()
+        
+        # 사용자 정보를 포함한 프롬프트 구성
+        user_info = f"""
+        사용자 정보:
+        - 이름: {user.nickname if user.nickname else '이름 없음'}
+        - 연령대: {user.age_range if user.age_range else '정보 없음'}
+        - 성별: {user.gender if user.gender else '정보 없음'}
+        - 평소 앓는 질환: {', '.join(user.usual_illness) if user.usual_illness and len(user.usual_illness) > 0 else '없음'}
+        """
+        
+        system_message = """
+        당신은 건강 상담을 전문으로 하는 친절한 AI 의료 어시스턴트입니다.
+        사용자의 정보를 기반으로 맞춤형 인사말을 생성하세요.
+        인사말은 따뜻하고 공감적이어야 하며, 사용자의 평소 질환이 있다면 이에 대해 언급하세요.
+        의학적 조언이나 진단을 제시하지 말고, 단순히 인사하고 어떤 도움이 필요한지 물어보세요.
+        """
+        
+        prompt = f"""
+        다음 사용자에게 처음 인사하는 메시지를 만들어주세요:
+        {user_info}
+        
+        인사말에는 다음 내용을 포함하세요:
+        1. 사용자의 이름으로 인사
+        2. 사용자의 평소 질환이 있다면 이에 대해 물어봄
+        3. 건강 상담 AI 어시스턴트로서 어떻게 도울 수 있는지 안내
+        """
+        
+        # 채팅 메시지 구성
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt}
+        ]
+        
+        # LLM 서비스를 통해 인사말 생성
+        greeting = await llm_service.generate_chat(messages)
+        return greeting
+        
+    except Exception as e:
+        print(f"LLM 서비스 오류: {str(e)}")
+        # 오류 발생 시 기본 인사말 제공 (기존 규칙 기반 인사말 사용)
+        return fallback_generate_greeting(user)
+
+
+# 기존 규칙 기반 인사말 생성 함수 (LLM 서비스 실패 시 대비책)
+def fallback_generate_greeting(user: User) -> str:
+    """
+    LLM 서비스 실패 시 사용할 기본 인사말 생성 함수
     """
     # 기본 인사말
     base_greeting = "저는 건강 상담 AI 비서입니다. 건강에 관한 질문이나 상담이 필요하시면 언제든지 말씀해주세요."
@@ -134,8 +261,21 @@ def generate_ai_greeting(user: User) -> str:
     return f"{name_greeting}{health_greeting}\n\n{base_greeting}"
 
 
+# 동기 버전의 인사말 생성 함수 (기존 코드와의 호환성 유지)
+def generate_ai_greeting_sync(user: User) -> str:
+    """
+    generate_ai_greeting의 동기 버전 (기존 코드와의 호환성 유지)
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(generate_ai_greeting(user))
+    finally:
+        loop.close()
+
+
 # 대화 내용을 분석하여 질병 가능성 판단
-def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Session) -> dict:
+async def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Session) -> dict:
     """대화 내용을 분석하여 가능성 있는 질병을 탐지합니다."""
     # 대화 메시지 조회
     messages = session.exec(
@@ -157,6 +297,81 @@ def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Sessi
         if message.sender == "user":
             conversation_text += f"{message.content}\n"
     
+    try:
+        # LLM 서비스를 사용하여 의학적 분석 수행
+        llm_service = get_llm_service()
+        analysis_result = await llm_service.analyze_text(
+            conversation_text, 
+            task="medical_analysis"
+        )
+        
+        # LLM 응답 처리
+        detected_symptoms = analysis_result.get("symptoms", [])
+        
+        # 질병 확률 정보 처리
+        diseases_with_probabilities = []
+        possible_diseases = analysis_result.get("possible_diseases", [])
+        
+        for disease_info in possible_diseases:
+            disease_name = disease_info.get("name", "")
+            probability = disease_info.get("probability", 50.0)
+            
+            # 데이터베이스에서 질병 검색 또는 생성
+            db_disease = session.exec(
+                select(Disease).where(Disease.name == disease_name)
+            ).first()
+            
+            # 질병이 없으면 새로 생성
+            if not db_disease and disease_name:
+                # 질병에 대한 설명 생성 (관련 증상으로부터)
+                related_symptoms = []
+                for symptom, diseases in symptom_disease_map.items():
+                    if disease_name in diseases:
+                        related_symptoms.append(symptom)
+                
+                description = f"{disease_name}는 일반적으로 {', '.join(related_symptoms[:3] if related_symptoms else ['다양한 증상'])} 등의 증상과 연관됩니다."
+                
+                db_disease = Disease(
+                    name=disease_name,
+                    description=description
+                )
+                session.add(db_disease)
+                session.commit()
+                session.refresh(db_disease)
+            
+            # 질병 ID를 포함하여 결과 저장 (질병이 DB에 있는 경우만)
+            if db_disease:
+                diseases_with_probabilities.append({
+                    "id": db_disease.id,
+                    "name": disease_name,
+                    "probability": probability
+                })
+        
+        # 건강 관리 조언
+        health_suggestions = analysis_result.get("health_suggestions", [])
+        
+        # 제안이 부족하면 일반적인 제안 추가
+        if len(health_suggestions) < 3:
+            health_suggestions.extend(general_suggestions)
+            health_suggestions = list(set(health_suggestions))[:5]  # 중복 제거 및 최대 5개로 제한
+        
+        return {
+            "symptoms": detected_symptoms,
+            "diseases_with_probabilities": diseases_with_probabilities,
+            "suggestions": health_suggestions[:5]  # 최대 5개의 제안만 반환
+        }
+        
+    except Exception as e:
+        print(f"LLM 의학 분석 오류: {str(e)}")
+        # 오류 발생 시 기존 규칙 기반 분석으로 대체
+        return fallback_analyze_conversation(conversation_text, session)
+
+
+# 기존 규칙 기반 대화 분석 함수 (LLM 서비스 실패 시 대비책)
+def fallback_analyze_conversation(conversation_text: str, session: Session) -> dict:
+    """
+    LLM 서비스 실패 시 사용할 기본 대화 분석 함수
+    """
     conversation_text_lower = conversation_text.lower()
     
     # 증상 감지 (대화에서 언급된 증상 추출)
@@ -214,7 +429,7 @@ def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Sessi
             probability = min(95, probability)
         else:
             matched_symptom_count = disease_symptom_counts.get(disease, 0)
-            total_symptom_count = len(symptom_disease_map.get(disease, []))
+            total_symptom_count = len(disease_symptoms.get(disease, []))
             
             if total_symptom_count > 0:
                 # 간단한 확률 계산 (매칭된 증상 수 / 질병 관련 전체 증상 수)
@@ -233,7 +448,7 @@ def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Sessi
         reverse=True
     )
     
-    # 건강 조언 생성
+    # 건강 관리 조언 생성
     collected_suggestions = set()
     for disease in sorted_diseases[:3]:  # 상위 3개 질환에 대한 제안만 수집
         if disease in disease_suggestions:
@@ -257,7 +472,7 @@ def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Sessi
             # 새 질병 생성
             db_disease = Disease(
                 name=disease,
-                description=f"{disease}는 일반적으로 {', '.join(symptom_disease_map.get(disease, [])[:3])} 등의 증상과 연관됩니다."
+                description=f"{disease}는 일반적으로 {', '.join(disease_symptoms.get(disease, [])[:3])} 등의 증상과 연관됩니다."
             )
             session.add(db_disease)
             session.commit()
@@ -277,9 +492,125 @@ def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Sessi
     }
 
 
+# 동기 버전의 대화 분석 함수 (기존 코드와의 호환성 유지)
+def analyze_conversation_for_diseases_sync(conversation_id: uuid.UUID, session: Session) -> dict:
+    """
+    analyze_conversation_for_diseases의 동기 버전 (기존 코드와의 호환성 유지)
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(analyze_conversation_for_diseases(conversation_id, session))
+    finally:
+        loop.close()
+
+
 # 대화 내용을 분석하여 리포트 내용 생성
-def generate_conversation_report(conversation_id: uuid.UUID, analysis_data: dict, session: Session) -> str:
+async def generate_conversation_report(conversation_id: uuid.UUID, analysis_data: dict, session: Session) -> str:
     """대화 내용을 분석하여 건강 분석 리포트를 생성합니다."""
+    # 대화에서 사용자 정보 가져오기
+    conversation = session.get(Conversation, conversation_id)
+    user = session.get(User, conversation.user_id)
+    
+    try:
+        # LLM 서비스 가져오기
+        llm_service = get_llm_service()
+        
+        # 대화 내용 수집
+        messages = session.exec(
+            select(ConversationMessage).where(
+                ConversationMessage.conversation_id == conversation_id
+            ).order_by(ConversationMessage.created_at)
+        ).all()
+        
+        conversation_text = ""
+        for message in messages:
+            sender = "사용자" if message.sender == "user" else "AI 어시스턴트"
+            conversation_text += f"{sender}: {message.content}\n\n"
+        
+        # 사용자 정보 구성
+        user_info = f"""
+        사용자 정보:
+        - 이름: {user.nickname if user.nickname else '이름 없음'}
+        - 연령대: {user.age_range if user.age_range else '정보 없음'}
+        - 성별: {user.gender if user.gender else '정보 없음'}
+        - 평소 앓는 질환: {', '.join(user.usual_illness) if user.usual_illness and len(user.usual_illness) > 0 else '없음'}
+        """
+        
+        # 분석 결과 처리
+        symptoms_text = "감지된 증상이 없습니다."
+        if analysis_data["symptoms"]:
+            symptoms_text = ", ".join(analysis_data["symptoms"])
+        
+        diseases_text = "가능성 있는 질환이 감지되지 않았습니다."
+        if analysis_data["diseases_with_probabilities"]:
+            diseases_text = "\n".join([
+                f"- {d['name']} ({d['probability']}%)" 
+                for d in analysis_data["diseases_with_probabilities"]
+            ])
+        
+        suggestions_text = "\n".join([f"- {s}" for s in analysis_data["suggestions"]])
+        
+        # 프롬프트 구성
+        system_message = """
+        당신은 의료 보고서 작성 전문가입니다. 대화 분석 결과를 바탕으로 환자를 위한 
+        건강 분석 리포트를 작성해주세요. 리포트는 전문적이면서도 이해하기 쉬운 말로 
+        작성되어야 하며, 다음 섹션을 포함해야 합니다:
+
+        1. 사용자 정보
+        2. 대화 내용 분석 소개
+        3. 감지된 증상 요약
+        4. 가능성 있는 질환 및 확률 분석
+        5. 건강 관리 조언
+        6. 면책 조항
+
+        주의: 최종 진단은 내리지 말고, 항상 전문의와 상담을 권장하세요.
+        리포트는 마크다운 형식으로 작성해주세요.
+        """
+        
+        prompt = f"""
+        다음 정보를 바탕으로 건강 분석 리포트를 작성해주세요:
+        
+        {user_info}
+        
+        ### 대화 내용 요약:
+        {conversation_text[:1000]}... (대화 내용 일부)
+        
+        ### 분석 결과:
+        
+        감지된 증상:
+        {symptoms_text}
+        
+        가능성 있는 질환:
+        {diseases_text}
+        
+        건강 관리 조언:
+        {suggestions_text}
+        
+        현재 시간: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+        """
+        
+        # 채팅 메시지 구성
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt}
+        ]
+        
+        # LLM 서비스를 통해 리포트 생성
+        report = await llm_service.generate_chat(messages)
+        return report
+        
+    except Exception as e:
+        print(f"LLM 리포트 생성 오류: {str(e)}")
+        # 오류 발생 시 기본 리포트 제공 (기존 규칙 기반 리포트 사용)
+        return fallback_generate_report(conversation_id, analysis_data, session)
+
+
+# 기존 규칙 기반 리포트 생성 함수 (LLM 서비스 실패 시 대비책)
+def fallback_generate_report(conversation_id: uuid.UUID, analysis_data: dict, session: Session) -> str:
+    """
+    LLM 서비스 실패 시 사용할 기본 리포트 생성 함수
+    """
     # 대화에서 사용자 정보 가져오기
     conversation = session.get(Conversation, conversation_id)
     user = session.get(User, conversation.user_id)
@@ -332,3 +663,16 @@ def generate_conversation_report(conversation_id: uuid.UUID, analysis_data: dict
 """
     
     return report
+
+
+# 동기 버전의 리포트 생성 함수 (기존 코드와의 호환성 유지)
+def generate_conversation_report_sync(conversation_id: uuid.UUID, analysis_data: dict, session: Session) -> str:
+    """
+    generate_conversation_report의 동기 버전 (기존 코드와의 호환성 유지)
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(generate_conversation_report(conversation_id, analysis_data, session))
+    finally:
+        loop.close()

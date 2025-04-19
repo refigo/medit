@@ -13,27 +13,27 @@ def create_db_and_tables():
     
     # 테이블 존재 확인을 위한 인스펙션
     inspector = sqlalchemy.inspect(engine)
+    existing_tables = inspector.get_table_names()
     
-    # user_diseases 테이블이 존재하는지 확인하고 있으면 먼저 수동으로 삭제
-    if 'user_diseases' in inspector.get_table_names():
-        with engine.begin() as conn:
-            conn.execute(sqlalchemy.text("DROP TABLE user_diseases CASCADE;"))
-    
-    # 다른 테이블들은 정상적으로 생성/재생성
     try:
-        # CASCADE 옵션을 사용하거나 존재하지 않으면 넘어가기
-        with engine.begin() as conn:
-            # 존재하는 경우에만 테이블 드롭
-            for table in reversed(SQLModel.metadata.sorted_tables):
-                if table.name in inspector.get_table_names():
-                    conn.execute(sqlalchemy.text(f"DROP TABLE {table.name} CASCADE;"))
-        
-        # 테이블 생성
-        SQLModel.metadata.create_all(engine)
+        # 테이블이 존재하지 않는 경우에만 생성
+        # 기존 테이블은 유지하여 데이터 보존
+        if not existing_tables:
+            # 데이터베이스가 완전히 비어있을 때만 모든 테이블 생성
+            print("데이터베이스가 비어있습니다. 모든 테이블을 생성합니다.")
+            SQLModel.metadata.create_all(engine)
+        else:
+            # 누락된 테이블만 생성
+            for table in SQLModel.metadata.sorted_tables:
+                if table.name not in existing_tables:
+                    print(f"테이블 생성: {table.name}")
+                    table.create(engine)
+            print("기존 테이블 유지, 누락된 테이블만 생성합니다.")
     except Exception as e:
         print(f"데이터베이스 초기화 중 오류 발생: {e}")
         # 오류가 발생해도 애플리케이션이 시작되도록 함
-        # 실제 테이블은 이미 존재할 가능성이 높음
+    
+    print(f"데이터베이스 초기화 완료. 현재 테이블: {', '.join(inspector.get_table_names())}")
 
 
 def get_session():
