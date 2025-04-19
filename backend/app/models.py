@@ -79,7 +79,8 @@ class FamilyMemberRead(FamilyMemberBase):
 
 
 class UserContactBase(SQLModel):
-    alias: Optional[str] = None
+    alias_nickname: Optional[str] = None
+    relation: Optional[str] = None
 
 
 class UserContact(UserContactBase, table=True):
@@ -123,3 +124,5 @@ class UserContactRead(UserContactBase):
     contact_user_id: uuid.UUID
     created_at: datetime
     contact_user: Optional[ContactUserInfo] = None
+    alias_nickname: Optional[str] = None
+    relation: Optional[str] = None

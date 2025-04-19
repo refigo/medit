@@ -183,7 +183,8 @@ def create_user_contact(
     
     - **login_id**: 사용자의 로그인 아이디
     - **contact_login_id**: 추가할 연락처 사용자의 로그인 아이디
-    - **alias**: 연락처 별명 (선택 사항)
+    - **alias_nickname**: 연락처의 별명 (선택 사항)
+    - **relation**: 관계 (예: "친구", "동료", "지인" 등) (선택 사항)
     """
     print(f"user_id: {login_id}")
     # 사용자 존재 여부 확인
@@ -198,7 +199,8 @@ def create_user_contact(
     
     # 연락처 생성
     db_contact = UserContact(
-        alias=contact.alias,
+        alias_nickname=contact.alias_nickname,
+        relation=contact.relation,
         user_id=user.id,
         contact_user_id=contact_user.id  # 조회한 사용자의 UUID를 사용
     )
@@ -248,7 +250,8 @@ def read_user_contacts(
             id=contact.id,
             user_id=contact.user_id,
             contact_user_id=contact.contact_user_id,
-            alias=contact.alias,
+            alias_nickname=contact.alias_nickname,
+            relation=contact.relation,
             created_at=contact.created_at,
             contact_user=ContactUserInfo(
                 id=contact_user.id,
