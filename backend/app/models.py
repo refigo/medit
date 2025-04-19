@@ -154,7 +154,7 @@ class Conversation(ConversationBase, table=True):
 
 
 class ConversationCreate(ConversationBase):
-    pass
+    message_content: Optional[str] = None  # 선택적 첫 메시지 내용
 
 
 class ConversationRead(ConversationBase):

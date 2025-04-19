@@ -284,20 +284,35 @@ def create_conversation(
     
     - **login_id**: 사용자의 로그인 아이디
     - **title**: 대화 제목 (선택 사항, 없으면 자동 생성될 수 있음)
+    - **message_content**: 첫 메시지 내용 (선택 사항, 없으면 메시지 생성 안 함)
     """
     # 사용자 존재 여부 확인
     user = session.exec(select(User).where(User.login_id == login_id)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # 대화 생성
+    # 대화 생성 (message_content는 Conversation 모델에 없으므로 전달하지 않음)
+    conversation_data = conversation.dict(exclude={"message_content"})
     db_conversation = Conversation(
-        **conversation.dict(),
+        **conversation_data,
         user_id=user.id
     )
     session.add(db_conversation)
     session.commit()
     session.refresh(db_conversation)
+    
+    # 선택적으로 첫 메시지 생성
+    if conversation.message_content:
+        # 메시지 생성 (사용자가 보낸 첫 번째 메시지)
+        db_message = ConversationMessage(
+            conversation_id=db_conversation.id,
+            sender="user",
+            content=conversation.message_content,
+            sequence=1  # 첫 번째 메시지
+        )
+        session.add(db_message)
+        session.commit()
+    
     return db_conversation
 
 
