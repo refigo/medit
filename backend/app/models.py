@@ -1,8 +1,8 @@
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from sqlmodel import Field, SQLModel, Relationship
 import uuid
-from sqlalchemy import Column, String, ARRAY, Integer, Text
+from sqlalchemy import Column, String, ARRAY, Integer, Text, JSON
 from pydantic import BaseModel
 
 
@@ -36,7 +36,6 @@ class User(UserBase, table=True):
         sa_relationship_kwargs={"foreign_keys": "[UserContact.contact_user_id]"}
     )
     conversations: List["Conversation"] = Relationship(back_populates="user")
-    user_diseases: List["UserDisease"] = Relationship(back_populates="user")
 
 
 class UserCreate(UserBase):
@@ -158,7 +157,6 @@ class Conversation(ConversationBase, table=True):
     user: User = Relationship(back_populates="conversations")
     messages: List["ConversationMessage"] = Relationship(back_populates="conversation")
     reports: List["ConversationReport"] = Relationship(back_populates="conversation")
-    user_diseases: List["UserDisease"] = Relationship(back_populates="conversation")
 
 
 class ConversationCreate(ConversationBase):
@@ -204,23 +202,24 @@ class ConversationMessageRead(ConversationMessageBase):
 
 
 class ConversationReportBase(SQLModel):
-    summary: Optional[str] = None
+    title: str = Field(max_length=200)
+    summary: Optional[str] = Field(default=None, max_length=500)
     content: str = Field(sa_column=Column(Text))
+    detected_symptoms: Optional[List[str]] = Field(default=None, sa_column=Column(ARRAY(String)))
+    # 질환과 확률을 함께 저장하는 리스트 필드: [{name: "질환명", probability: 80.5}, ...]
+    diseases_with_probabilities: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
+    health_suggestions: Optional[List[str]] = Field(default=None, sa_column=Column(ARRAY(String)))
 
 
 class ConversationReport(ConversationReportBase, table=True):
-    __tablename__ = "conversation_report"
+    __tablename__ = "conversation_reports"
     
-    id: uuid.UUID = Field(
-        default_factory=uuid.uuid4,
-        primary_key=True,
-        index=True,
-    )
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     conversation_id: uuid.UUID = Field(foreign_key="conversations.id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
     # 관계 설정
-    conversation: Conversation = Relationship(back_populates="reports")
+    conversation: "Conversation" = Relationship(back_populates="reports")
 
 
 class ConversationReportCreate(ConversationReportBase):
@@ -234,16 +233,14 @@ class ConversationReportRead(ConversationReportBase):
 
 
 class DiseaseBase(SQLModel):
-    name: str = Field(unique=True)
+    name: str = Field(max_length=200)
+    description: Optional[str] = Field(default=None, sa_column=Column(Text))
 
 
 class Disease(DiseaseBase, table=True):
     __tablename__ = "diseases"
     
-    id: int = Field(primary_key=True, index=True)
-    
-    # 관계 설정
-    user_diseases: List["UserDisease"] = Relationship(back_populates="disease")
+    id: int = Field(default=None, primary_key=True, index=True)
 
 
 class DiseaseCreate(DiseaseBase):
@@ -252,44 +249,6 @@ class DiseaseCreate(DiseaseBase):
 
 class DiseaseRead(DiseaseBase):
     id: int
-
-
-class UserDiseaseBase(SQLModel):
-    probability: Optional[int] = None
-    summary: Optional[str] = None
-    note: Optional[str] = Field(default=None, sa_column=Column(Text))
-
-
-class UserDisease(UserDiseaseBase, table=True):
-    __tablename__ = "user_diseases"
-    
-    id: uuid.UUID = Field(
-        default_factory=uuid.uuid4,
-        primary_key=True,
-        index=True,
-    )
-    user_id: uuid.UUID = Field(foreign_key="users.id")
-    conversation_id: Optional[uuid.UUID] = Field(foreign_key="conversations.id", default=None)
-    disease_id: int = Field(foreign_key="diseases.id")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    
-    # 관계 설정
-    user: User = Relationship(back_populates="user_diseases")
-    conversation: Optional[Conversation] = Relationship(back_populates="user_diseases")
-    disease: Disease = Relationship(back_populates="user_diseases")
-
-
-class UserDiseaseCreate(UserDiseaseBase):
-    disease_id: int
-
-
-class UserDiseaseRead(UserDiseaseBase):
-    id: uuid.UUID
-    user_id: uuid.UUID
-    conversation_id: Optional[uuid.UUID] = None
-    disease_id: int
-    created_at: datetime
-    disease: Optional[DiseaseRead] = None
 
 
 # 대화 응답 통합 모델

@@ -1,10 +1,10 @@
 from fastapi import FastAPI, Depends, HTTPException, APIRouter, status, Query, Path
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
-import uuid
-from typing import Optional, List
-from datetime import datetime
 from sqlalchemy import desc
+import uuid
+from typing import Optional, List, Dict, Any
+from datetime import datetime
 
 from app.database import get_session, create_db_and_tables
 from app.models import (
@@ -15,7 +15,6 @@ from app.models import (
     ConversationMessage, ConversationMessageCreate, ConversationMessageRead,
     ConversationReport, ConversationReportCreate, ConversationReportRead,
     Disease, DiseaseCreate, DiseaseRead,
-    UserDisease, UserDiseaseCreate, UserDiseaseRead,
     ConversationWithMessage, MessageWithResponse
 )
 from app.config import settings
@@ -519,32 +518,36 @@ def create_conversation_message(
     # 리포트 생성이 필요한 경우 응답 내용 수정
     if generate_report:
         # 대화에서 증상 분석
-        detected_diseases = analyze_conversation_for_diseases(conversation_id, session)
+        analysis_data = analyze_conversation_for_diseases(conversation_id, session)
         
         # 리포트 생성
-        report_content = generate_conversation_report(conversation_id, detected_diseases, session)
+        report_content = generate_conversation_report(conversation_id, analysis_data, session)
         
-        # 리포트 저장
+        # 리포트 저장 (증상, 질환-확률 통합 정보, 제안 정보 포함)
         report = ConversationReport(
             conversation_id=conversation_id,
             title="자동 생성된 건강 분석 리포트",
             summary="AI가 분석한 건강 상태 요약",
-            content=report_content
+            content=report_content,
+            detected_symptoms=analysis_data["symptoms"],
+            diseases_with_probabilities=analysis_data["diseases_with_probabilities"],
+            health_suggestions=analysis_data["suggestions"]
         )
         session.add(report)
         session.commit()
         session.refresh(report)
         
         # AI 응답을 리포트 관련 내용으로 변경
-        ai_response_text = f"""
-대화 내용을 분석한 결과, 다음과 같은 건강 상태가 감지되었습니다:
+        ai_response_text = f"""대화 내용을 분석한 결과, 다음과 같은 건강 상태가 감지되었습니다:
 
-{', '.join(detected_diseases)}
+감지된 증상: {', '.join(analysis_data["symptoms"]) if analysis_data["symptoms"] else "특별한 증상이 감지되지 않음"}
+
+가능성 있는 질환:
+{", ".join([f'{disease["name"]} ({disease["probability"]}%)' for disease in analysis_data["diseases_with_probabilities"][:3]])}
 
 자세한 분석 내용을 담은 건강 리포트를 생성했습니다. 리포트에서 더 상세한 정보와 건강 관리 조언을 확인하실 수 있습니다.
 
-이 분석은 대화 내용을 기반으로 한 참고 사항이며, 정확한 진단을 위해서는 의사와 상담하시기 바랍니다.
-"""
+이 분석은 대화 내용을 기반으로 한 참고 사항이며, 정확한 진단을 위해서는 의사와 상담하시기 바랍니다."""
     
     # AI 응답 저장
     ai_message = ConversationMessage(
@@ -665,157 +668,164 @@ def read_conversation_reports(
 
 
 # Disease endpoints
-@app.post("/diseases/", response_model=DiseaseRead, tags=["Diseases"], summary="질병 등록")
+@app.post("/diseases/", response_model=DiseaseRead, tags=["Diseases"], summary="질병 정보 생성")
 def create_disease(
     disease: DiseaseCreate = ...,
     session: Session = Depends(get_session)
 ):
     """
-    새로운 질병을 등록합니다.
+    질병 정보를 생성합니다.
     
     - **name**: 질병 이름
+    - **description**: 질병에 대한 설명
     """
     # 이미 존재하는 질병인지 확인
-    existing_disease = session.exec(select(Disease).where(Disease.name == disease.name)).first()
+    existing_disease = session.exec(
+        select(Disease).where(Disease.name == disease.name)
+    ).first()
+    
     if existing_disease:
         return existing_disease
     
     # 새 질병 생성
-    db_disease = Disease(**disease.dict())
+    db_disease = Disease.from_orm(disease)
     session.add(db_disease)
     session.commit()
     session.refresh(db_disease)
+    
     return db_disease
 
 
-@app.get("/diseases/", response_model=list[DiseaseRead], tags=["Diseases"], summary="질병 목록 조회")
+@app.get("/diseases/", response_model=list[DiseaseRead], tags=["Diseases"], summary="질병 정보 목록 조회")
 def read_diseases(
     session: Session = Depends(get_session),
     skip: int = 0,
     limit: int = 100
 ):
     """
-    질병 목록을 조회합니다.
+    질병 정보 목록을 조회합니다.
     
-    - **skip**: 건너뛸 질병 수
-    - **limit**: 최대 반환할 질병 수
+    - **skip**: 건너뛸 항목 수
+    - **limit**: 최대 반환할 항목 수
     """
     diseases = session.exec(select(Disease).offset(skip).limit(limit)).all()
     return diseases
 
 
-@app.get("/diseases/{disease_id}", response_model=DiseaseRead, tags=["Diseases"], summary="질병 조회")
+@app.get("/diseases/{disease_id}", response_model=DiseaseRead, tags=["Diseases"], summary="질병 정보 상세 조회")
 def read_disease(
     disease_id: int = Path(..., description="질병 ID"),
     session: Session = Depends(get_session)
 ):
     """
-    특정 질병을 조회합니다.
+    특정 질병 정보를 조회합니다.
     
     - **disease_id**: 질병 ID
     """
     disease = session.get(Disease, disease_id)
     if not disease:
         raise HTTPException(status_code=404, detail="Disease not found")
+    
     return disease
 
 
-# User Disease endpoints
-@app.post("/users/{login_id}/diseases/", response_model=UserDiseaseRead, tags=["User Diseases"], summary="사용자 질병 정보 추가")
-def create_user_disease(
+@app.get("/users/{login_id}/reports/diseases/", response_model=Dict[str, List[Dict[str, Any]]], tags=["Reports"], summary="사용자의 모든 리포트에서 질환 및 확률 정보 조회")
+def read_user_disease_probabilities(
     login_id: str = Path(..., description="사용자의 로그인 아이디"),
-    user_disease: UserDiseaseCreate = ...,
-    conversation_id: Optional[uuid.UUID] = Query(None, description="관련 대화 ID (선택 사항)"),
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_session),
+    report_id: Optional[uuid.UUID] = Query(None, description="특정 리포트 ID (선택 사항)")
 ):
     """
-    사용자와 관련된 질병 정보를 추가합니다.
+    사용자의 건강 리포트에서 감지된 질환과 확률 정보를 조회합니다.
     
     - **login_id**: 사용자의 로그인 아이디
-    - **disease_id**: 질병 ID
-    - **probability**: 질병 가능성 (AI가 추론, 선택 사항)
-    - **summary**: AI 요약 (선택 사항)
-    - **note**: 추가 정보 (선택 사항)
-    - **conversation_id**: 관련 대화 ID (선택 사항)
+    - **report_id**: 특정 리포트 ID (선택적)
+    
+    각 질환 정보는 다음 형식으로 제공됩니다:
+    ```
+    {
+        "name": "질환명",
+        "probability": 85.5
+    }
+    ```
+    
+    특정 리포트 ID가 제공되면 해당 리포트의 질환 목록만 반환하고,
+    그렇지 않으면 모든 리포트의 질환 정보를 리포트 ID를 키로 하는 사전 형태로 반환합니다.
     """
-    # 사용자 존재 여부 확인
+    # 사용자 확인
     user = session.exec(select(User).where(User.login_id == login_id)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # 질병 존재 여부 확인
-    disease = session.get(Disease, user_disease.disease_id)
-    if not disease:
-        raise HTTPException(status_code=404, detail="Disease not found")
+    # 사용자의 대화 ID 목록 조회
+    conversation_ids = [conv.id for conv in session.exec(
+        select(Conversation).where(Conversation.user_id == user.id)
+    ).all()]
     
-    # 대화 존재 여부 확인 (제공된 경우)
-    if conversation_id:
-        conversation = session.get(Conversation, conversation_id)
-        if not conversation:
-            raise HTTPException(status_code=404, detail="Conversation not found")
+    if not conversation_ids:
+        return {}
     
-    # 사용자 질병 정보 생성
-    db_user_disease = UserDisease(
-        **user_disease.dict(),
-        user_id=user.id,
-        conversation_id=conversation_id
+    # 기본 쿼리: 사용자의 모든 대화에 속한 리포트 조회
+    query = select(ConversationReport).where(
+        ConversationReport.conversation_id.in_(conversation_ids)
     )
-    session.add(db_user_disease)
-    session.commit()
-    session.refresh(db_user_disease)
     
-    # 결과에 Disease 정보 포함
-    result = UserDiseaseRead.from_orm(db_user_disease)
-    result.disease = DiseaseRead.from_orm(disease)
+    # 특정 리포트만 필터링
+    if report_id:
+        query = query.where(ConversationReport.id == report_id)
+    
+    reports = session.exec(query).all()
+    
+    # 결과 구성
+    result = {}
+    for report in reports:
+        if report.diseases_with_probabilities:  # None이 아닐 경우만 추가
+            result[str(report.id)] = report.diseases_with_probabilities
+    
+    # 특정 리포트만 요청한 경우 해당 리포트의 질환 정보만 반환
+    if report_id and str(report_id) in result:
+        return result[str(report_id)]
     
     return result
 
 
-@app.get("/users/{login_id}/diseases/", response_model=list[UserDiseaseRead], tags=["User Diseases"], summary="사용자 질병 정보 조회")
-def read_user_diseases(
+@app.get("/users/{login_id}/reports/", response_model=list[ConversationReportRead], tags=["Reports"], summary="사용자 리포트 목록 조회")
+def read_user_reports(
     login_id: str = Path(..., description="사용자의 로그인 아이디"),
     session: Session = Depends(get_session),
     skip: int = 0,
-    limit: int = 100,
-    conversation_id: Optional[uuid.UUID] = Query(None, description="특정 대화의 질병 정보만 조회 (선택 사항)")
+    limit: int = 100
 ):
     """
-    사용자와 관련된 질병 정보를 조회합니다.
+    사용자의 건강 분석 리포트 목록을 조회합니다.
     
     - **login_id**: 사용자의 로그인 아이디
     - **skip**: 건너뛸 항목 수
     - **limit**: 최대 반환할 항목 수
-    - **conversation_id**: 특정 대화의 질병 정보만 조회 (선택 사항)
     """
-    # 사용자 존재 여부 확인
+    # 사용자 확인
     user = session.exec(select(User).where(User.login_id == login_id)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # 기본 쿼리 구성
-    query = select(UserDisease).where(UserDisease.user_id == user.id)
+    # 사용자의 대화 ID 목록 조회
+    conversation_ids = [conv.id for conv in session.exec(
+        select(Conversation).where(Conversation.user_id == user.id)
+    ).all()]
     
-    # 대화 ID로 필터링 (제공된 경우)
-    if conversation_id:
-        query = query.where(UserDisease.conversation_id == conversation_id)
+    if not conversation_ids:
+        return []
     
-    # 쿼리 실행
-    user_diseases = session.exec(
-        query
-        .order_by(UserDisease.created_at.desc())
+    # 사용자의 모든 대화에 속한 리포트 조회
+    reports = session.exec(
+        select(ConversationReport)
+        .where(ConversationReport.conversation_id.in_(conversation_ids))
+        .order_by(desc(ConversationReport.created_at))
         .offset(skip)
         .limit(limit)
     ).all()
     
-    # 결과에 Disease 정보 포함
-    results = []
-    for ud in user_diseases:
-        disease = session.get(Disease, ud.disease_id)
-        result = UserDiseaseRead.from_orm(ud)
-        result.disease = DiseaseRead.from_orm(disease)
-        results.append(result)
-    
-    return results
+    return reports
 
 
 # AI 응답 생성 함수 (임시)
@@ -892,15 +902,15 @@ def generate_ai_greeting(user: User) -> str:
     # 사용자의 평소 질환이 있는 경우, 그에 맞는 인사말 추가
     health_greeting = ""
     if user.usual_illness and len(user.usual_illness) > 0:
-        health_greeting = f"\n평소 {', '.join(user.usual_illness)}으로 불편함을 겪고 계신 것으로 알고 있습니다. 오늘은 어떠신가요?"
+        health_greeting = f"\n평소 {', '.join(user.usual_illness)}으로 불편함을 겪고 계시는 것으로 알고 있습니다. 오늘은 어떠신가요?"
     
     # 최종 인사말 조합
     return f"{name_greeting}{health_greeting}\n\n{base_greeting}"
 
 
 # 대화 내용을 분석하여 증상 및 질환 파악하는 함수
-def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Session) -> list[str]:
-    """대화 내용을 분석하여 언급된 증상들로부터 가능한 질환을 파악합니다."""
+def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Session) -> dict:
+    """대화 내용을 분석하여 언급된 증상들로부터 가능한 질환과 확률을 파악합니다."""
     # 대화 메시지 전체 조회
     messages = session.exec(
         select(ConversationMessage)
@@ -926,6 +936,36 @@ def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Sessi
         "관절통": ["관절염", "류마티스 관절염", "통풍"]
     }
     
+    # 질환별 증상 매핑 (역방향 매핑 생성)
+    disease_symptoms = {}
+    for symptom, diseases in symptom_disease_map.items():
+        for disease in diseases:
+            if disease not in disease_symptoms:
+                disease_symptoms[disease] = []
+            disease_symptoms[disease].append(symptom)
+    
+    # 질환별 건강 제안 (샘플 데이터)
+    disease_suggestions = {
+        "편두통": ["충분한 수면 취하기", "스트레스 관리하기", "정기적인 운동하기"],
+        "긴장성 두통": ["목과 어깨 스트레칭", "스트레스 관리", "따뜻한 목욕"],
+        "위염": ["자극적인 음식 피하기", "작은 양 자주 먹기", "금주하기"],
+        "장염": ["충분한 수분 섭취", "소화가 쉬운 음식 먹기", "휴식 취하기"],
+        "감기": ["충분한 휴식", "수분 섭취", "비타민 C 섭취"],
+        "독감": ["집에서 휴식", "해열제 복용 고려", "충분한 수분 섭취"],
+        "빈혈": ["철분이 풍부한 음식 섭취", "비타민 C와 함께 철분 섭취", "과로 피하기"],
+        "저혈압": ["천천히 일어나기", "작은 양 자주 먹기", "충분한 수분 섭취"],
+        "알레르기": ["알레르기 유발 물질 피하기", "항히스타민제 고려", "의사와 상담"],
+    }
+    
+    # 일반적인 건강 제안 (기본값)
+    general_suggestions = [
+        "충분한 휴식과 수면을 취하세요",
+        "물을 충분히 마시세요",
+        "균형 잡힌 식단을 유지하세요",
+        "규칙적인 운동을 하세요",
+        "스트레스를 관리하세요"
+    ]
+    
     # 대화에서 언급된 증상들 추출
     detected_symptoms = set()
     for message in messages:
@@ -934,21 +974,68 @@ def analyze_conversation_for_diseases(conversation_id: uuid.UUID, session: Sessi
             if symptom in message_content:
                 detected_symptoms.add(symptom)
     
-    # 증상에 따른 가능한 질환들 추출
-    possible_diseases = set()
+    # 증상이 없을 경우 빈 결과 반환
+    if not detected_symptoms:
+        return {
+            "symptoms": [],
+            "diseases_with_probabilities": [],
+            "suggestions": general_suggestions
+        }
+    
+    # 각 질환별 점수 계산 (확률 산출 위함)
+    disease_scores = {}
     for symptom in detected_symptoms:
-        possible_diseases.update(symptom_disease_map.get(symptom, []))
+        for disease in symptom_disease_map.get(symptom, []):
+            if disease not in disease_scores:
+                disease_scores[disease] = 0
+            disease_scores[disease] += 1
     
-    # 질환이 발견되지 않았을 경우 기본값 추가
-    if not possible_diseases:
-        possible_diseases.add("특별한 질환이 감지되지 않음")
+    # 질환별 확률 계산
+    disease_probabilities = {}
+    for disease, score in disease_scores.items():
+        if disease in disease_symptoms:
+            total_symptoms = len(disease_symptoms[disease])
+            # 최소 확률은 30%, 최대 확률은 90%로 제한
+            raw_probability = (score / total_symptoms) * 100
+            adjusted_probability = 30 + (raw_probability * 0.6)  # 30%~90% 범위로 조정
+            disease_probabilities[disease] = min(90, round(adjusted_probability, 1))
     
-    return list(possible_diseases)
+    # 확률이 높은 순으로 질환 정렬
+    sorted_diseases = sorted(
+        disease_probabilities.keys(), 
+        key=lambda x: disease_probabilities[x], 
+        reverse=True
+    )
+    
+    # 질환에 맞는 건강 제안 수집
+    collected_suggestions = set()
+    for disease in sorted_diseases[:3]:  # 상위 3개 질환에 대한 제안만 수집
+        if disease in disease_suggestions:
+            collected_suggestions.update(disease_suggestions[disease])
+    
+    # 제안이 부족하면 일반적인 제안 추가
+    if len(collected_suggestions) < 5:
+        collected_suggestions.update(general_suggestions)
+    
+    # 질환과 확률 정보를 하나의 리스트로 통합
+    diseases_with_probabilities = []
+    for disease in sorted_diseases:
+        probability = disease_probabilities.get(disease, 50.0)
+        diseases_with_probabilities.append({
+            "name": disease,
+            "probability": probability
+        })
+    
+    return {
+        "symptoms": list(detected_symptoms),
+        "diseases_with_probabilities": diseases_with_probabilities,
+        "suggestions": list(collected_suggestions)[:5]  # 최대 5개의 제안만 반환
+    }
 
 
-# 대화 및 질환 분석 결과로 리포트 내용 생성
-def generate_conversation_report(conversation_id: uuid.UUID, diseases: list[str], session: Session) -> str:
-    """대화 내용과 분석된 질환을 바탕으로 건강 분석 리포트를 생성합니다."""
+# 대화 내용을 분석하여 리포트 내용 생성
+def generate_conversation_report(conversation_id: uuid.UUID, analysis_data: dict, session: Session) -> str:
+    """대화 내용을 분석하여 건강 분석 리포트를 생성합니다."""
     # 대화에서 사용자 정보 가져오기
     conversation = session.get(Conversation, conversation_id)
     user = session.get(User, conversation.user_id)
@@ -963,21 +1050,21 @@ def generate_conversation_report(conversation_id: uuid.UUID, diseases: list[str]
     if user.usual_illness and len(user.usual_illness) > 0:
         existing_illness = ", ".join(user.usual_illness)
     
+    # 감지된 증상 정리
+    symptom_section = "## 감지된 증상\n\n"
+    for symptom in analysis_data["symptoms"]:
+        symptom_section += f"- {symptom}\n"
+    
     # 증상 분석 및 추천 사항
     disease_analysis = "## 분석된 가능성 있는 질환\n\n"
-    for disease in diseases:
-        disease_analysis += f"- {disease}\n"
+    for disease in analysis_data["diseases_with_probabilities"]:
+        probability = disease["probability"]
+        disease_analysis += f"- {disease['name']} ({probability}%)\n"
     
-    # 일반적인 건강 조언
-    health_advice = """
-## 건강 관리 조언
-
-1. 충분한 휴식과 수면을 취하세요.
-2. 물을 충분히 마시고 균형 잡힌 식사를 하세요.
-3. 규칙적인 운동을 통해 신체 건강을 유지하세요.
-4. 스트레스를 관리하고 정신 건강을 돌보세요.
-5. 필요한 경우 의료 전문가와 상담하세요.
-"""
+    # 건강 관리 조언
+    health_advice = "## 건강 관리 조언\n\n"
+    for i, suggestion in enumerate(analysis_data["suggestions"], 1):
+        health_advice += f"{i}. {suggestion}\n"
     
     # 최종 리포트 작성
     report = f"""# 건강 분석 리포트
@@ -989,11 +1076,13 @@ def generate_conversation_report(conversation_id: uuid.UUID, diseases: list[str]
 ## 대화 내용 분석
 대화 내용을 바탕으로 분석한 결과입니다.
 
+{symptom_section}
+
 {disease_analysis}
 
 {health_advice}
 
-*참고: 이 리포트는 자동으로 생성된 것으로, 정확한 진단을 위해서는 의사와 상담하세요.*
+*참고: 이 리포트는 자동으로 생성된 것으로, 정확한 진단을 위해서는 의사와 상담하시기 바랍니다.*
 
 생성 시간: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
