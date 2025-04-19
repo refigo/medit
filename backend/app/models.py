@@ -2,7 +2,7 @@ from typing import Optional, List
 from datetime import datetime
 from sqlmodel import Field, SQLModel, Relationship
 import uuid
-from sqlalchemy import Column, String, ARRAY
+from sqlalchemy import Column, String, ARRAY, Integer, Text
 
 
 class UserBase(SQLModel):
@@ -34,6 +34,8 @@ class User(UserBase, table=True):
         back_populates="contact_user",
         sa_relationship_kwargs={"foreign_keys": "[UserContact.contact_user_id]"}
     )
+    conversations: List["Conversation"] = Relationship(back_populates="user")
+    user_diseases: List["UserDisease"] = Relationship(back_populates="user")
 
 
 class UserCreate(UserBase):
@@ -126,3 +128,156 @@ class UserContactRead(UserContactBase):
     contact_user: Optional[ContactUserInfo] = None
     alias_nickname: Optional[str] = None
     relation: Optional[str] = None
+
+
+# Q&A Conversation Models
+class ConversationBase(SQLModel):
+    title: Optional[str] = None
+
+
+class Conversation(ConversationBase, table=True):
+    __tablename__ = "conversations"
+    
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+        index=True,
+    )
+    user_id: uuid.UUID = Field(foreign_key="users.id")
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # 관계 설정
+    user: User = Relationship(back_populates="conversations")
+    messages: List["ConversationMessage"] = Relationship(back_populates="conversation")
+    reports: List["ConversationReport"] = Relationship(back_populates="conversation")
+    user_diseases: List["UserDisease"] = Relationship(back_populates="conversation")
+
+
+class ConversationCreate(ConversationBase):
+    pass
+
+
+class ConversationRead(ConversationBase):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    started_at: datetime
+
+
+class ConversationMessageBase(SQLModel):
+    sender: str  # 'user' | 'ai assistant'
+    content: str = Field(sa_column=Column(Text))
+    sequence: int
+
+
+class ConversationMessage(ConversationMessageBase, table=True):
+    __tablename__ = "conversation_messages"
+    
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+        index=True,
+    )
+    conversation_id: uuid.UUID = Field(foreign_key="conversations.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # 관계 설정
+    conversation: Conversation = Relationship(back_populates="messages")
+
+
+class ConversationMessageCreate(ConversationMessageBase):
+    pass
+
+
+class ConversationMessageRead(ConversationMessageBase):
+    id: uuid.UUID
+    conversation_id: uuid.UUID
+    created_at: datetime
+
+
+class ConversationReportBase(SQLModel):
+    summary: Optional[str] = None
+    content: str = Field(sa_column=Column(Text))
+
+
+class ConversationReport(ConversationReportBase, table=True):
+    __tablename__ = "conversation_report"
+    
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+        index=True,
+    )
+    conversation_id: uuid.UUID = Field(foreign_key="conversations.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # 관계 설정
+    conversation: Conversation = Relationship(back_populates="reports")
+
+
+class ConversationReportCreate(ConversationReportBase):
+    pass
+
+
+class ConversationReportRead(ConversationReportBase):
+    id: uuid.UUID
+    conversation_id: uuid.UUID
+    created_at: datetime
+
+
+class DiseaseBase(SQLModel):
+    name: str = Field(unique=True)
+
+
+class Disease(DiseaseBase, table=True):
+    __tablename__ = "diseases"
+    
+    id: int = Field(primary_key=True, index=True)
+    
+    # 관계 설정
+    user_diseases: List["UserDisease"] = Relationship(back_populates="disease")
+
+
+class DiseaseCreate(DiseaseBase):
+    pass
+
+
+class DiseaseRead(DiseaseBase):
+    id: int
+
+
+class UserDiseaseBase(SQLModel):
+    probability: Optional[int] = None
+    summary: Optional[str] = None
+    note: Optional[str] = Field(default=None, sa_column=Column(Text))
+
+
+class UserDisease(UserDiseaseBase, table=True):
+    __tablename__ = "user_diseases"
+    
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+        index=True,
+    )
+    user_id: uuid.UUID = Field(foreign_key="users.id")
+    conversation_id: Optional[uuid.UUID] = Field(foreign_key="conversations.id", default=None)
+    disease_id: int = Field(foreign_key="diseases.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # 관계 설정
+    user: User = Relationship(back_populates="user_diseases")
+    conversation: Optional[Conversation] = Relationship(back_populates="user_diseases")
+    disease: Disease = Relationship(back_populates="user_diseases")
+
+
+class UserDiseaseCreate(UserDiseaseBase):
+    disease_id: int
+
+
+class UserDiseaseRead(UserDiseaseBase):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    conversation_id: Optional[uuid.UUID] = None
+    disease_id: int
+    created_at: datetime
+    disease: Optional[DiseaseRead] = None
