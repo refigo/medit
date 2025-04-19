@@ -160,7 +160,8 @@ class Conversation(ConversationBase, table=True):
 
 
 class ConversationCreate(ConversationBase):
-    message_content: Optional[str] = None  # 선택적 첫 메시지 내용
+    message_content: Optional[str] = None
+    request_report: Optional[Dict[str, Any]] = None
 
 
 class ConversationRead(ConversationBase):
@@ -171,7 +172,7 @@ class ConversationRead(ConversationBase):
 
 class ConversationMessageBase(SQLModel):
     sender: str  # 'user' | 'ai assistant'
-    content: str = Field(sa_column=Column(Text))
+    content: Optional[str] = Field(default=None, sa_column=Column(Text))
 
 
 class ConversationMessage(ConversationMessageBase, table=True):
@@ -191,7 +192,7 @@ class ConversationMessage(ConversationMessageBase, table=True):
 
 
 class ConversationMessageCreate(ConversationMessageBase):
-    pass
+    request_report: Optional[Dict[str, Any]] = None
 
 
 class ConversationMessageRead(ConversationMessageBase):
@@ -254,6 +255,7 @@ class DiseaseRead(DiseaseBase):
 # 대화 응답 통합 모델
 class ConversationWithMessage(ConversationRead):
     conversation_message: Optional[ConversationMessageRead] = None
+    generated_report: Optional[ConversationReportRead] = None
 
 
 # 메시지 응답 통합 모델

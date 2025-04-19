@@ -5,6 +5,7 @@ from sqlalchemy import desc
 import uuid
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+import asyncio
 
 from app.database import get_session, create_db_and_tables
 from app.models import (
@@ -19,11 +20,12 @@ from app.models import (
 )
 from app.config import settings
 from app.ai_assistant import (
-    generate_ai_response_sync as generate_ai_response,
-    generate_ai_greeting_sync as generate_ai_greeting,
-    analyze_conversation_for_diseases_sync as analyze_conversation_for_diseases,
-    generate_conversation_report_sync as generate_conversation_report
+    generate_ai_response,
+    generate_ai_greeting,
+    analyze_conversation_for_diseases,
+    generate_conversation_report
 )
+from app.llm.openai_service import OpenAIService
 
 app = FastAPI(title="Medit API")
 
@@ -36,17 +38,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 애플리케이션 시작 시 실행할 작업
 @app.on_event("startup")
-def on_startup():
-    # 애플리케이션 시작 시 데이터베이스 테이블 자동 생성
+async def on_startup():
+    # 데이터베이스 테이블 생성
     create_db_and_tables()
-    print("Database tables created successfully")
-
+    
+    # OpenAI API 키 테스트
+    try:
+        print("OpenAI API 키 유효성 테스트 중...")
+        openai_service = OpenAIService()
+        result = await openai_service.test_api_key()
+        
+        if result["success"]:
+            print(f"OpenAI API 키 유효성 테스트 성공! 모델: {result['model']}, 응답: {result['response']}")
+        else:
+            print(f"OpenAI API 키 유효성 테스트 실패: {result['error']}")
+            print("WARNING: AI 응답이 제대로 작동하지 않을 수 있습니다.")
+    except Exception as e:
+        print(f"OpenAI API 키 테스트 중 오류 발생: {str(e)}")
+        print("WARNING: AI 응답이 제대로 작동하지 않을 수 있습니다.")
 
 @app.get("/", tags=["Root"])
 def read_root():
     return {"message": "Welcome to Medit API"}
-
 
 # User endpoints
 @app.post("/users/", response_model=UserRead, tags=["Users"], summary="사용자 생성")
@@ -311,7 +326,7 @@ def read_user_contacts(
 
 # Conversation endpoints
 @app.post("/users/{login_id}/conversations/", response_model=ConversationWithMessage, tags=["Conversations"], summary="대화 생성")
-def create_conversation(
+async def create_conversation(
     login_id: str = Path(..., description="사용자의 로그인 아이디"),
     conversation: ConversationCreate = ...,
     session: Session = Depends(get_session)
@@ -322,6 +337,7 @@ def create_conversation(
     - **login_id**: 사용자의 로그인 아이디
     - **title**: 대화 제목 (선택 사항, 없으면 자동 생성될 수 있음)
     - **message_content**: 첫 메시지 내용 (선택 사항, 없으면 AI가 먼저 인사)
+    - **request_report**: 리포트 요청 데이터 (선택 사항, 증상 정보 등을 포함)
     
     반환값은 생성된 대화와 시작 메시지(들)를 포함합니다.
     """
@@ -330,8 +346,8 @@ def create_conversation(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # 대화 생성 (message_content는 Conversation 모델에 없으므로 전달하지 않음)
-    conversation_data = conversation.dict(exclude={"message_content"})
+    # 대화 생성 (message_content와 request_report는 Conversation 모델에 없으므로 전달하지 않음)
+    conversation_data = conversation.dict(exclude={"message_content", "request_report"})
     db_conversation = Conversation(
         **conversation_data,
         user_id=user.id
@@ -344,8 +360,107 @@ def create_conversation(
     result = ConversationWithMessage.from_orm(db_conversation)
     result.conversation_message = None
     
-    # 사용자가 메시지를 보낸 경우
-    if conversation.message_content:
+    # 리포트 요청이 있는 경우
+    if conversation.request_report:
+        # 증상 정보를 문자열로 변환
+        symptom_text = ""
+        if conversation.request_report.get("body_parts"):
+            body_parts_str = ", ".join(conversation.request_report.get("body_parts", []))
+            symptom_text += f"아픈 부위: {body_parts_str}\n"
+        
+        if conversation.request_report.get("feeling"):
+            symptom_text += f"증상 느낌: {conversation.request_report.get('feeling')}\n"
+        
+        if conversation.request_report.get("duration"):
+            symptom_text += f"지속 기간: {conversation.request_report.get('duration')}\n"
+        
+        if conversation.request_report.get("pain_intensity"):
+            symptom_text += f"통증 강도: {conversation.request_report.get('pain_intensity')}\n"
+        
+        if conversation.request_report.get("symptom"):
+            symptom_text += f"추가 증상: {conversation.request_report.get('symptom')}\n"
+        
+        # 사용자 메시지 생성
+        user_message_content = "다음 증상에 대해 분석해 주세요:\n" + symptom_text
+        db_message = ConversationMessage(
+            conversation_id=db_conversation.id,
+            sender="user",
+            content=user_message_content,
+            sequence=1  # 첫 번째 메시지는 항상 1
+        )
+        session.add(db_message)
+        session.commit()
+        session.refresh(db_message)
+        
+        # AI 응답 메시지 생성
+        response_text = await generate_ai_response(user_message_content)
+        
+        # 응답이 None인 경우 기본 응답으로 대체
+        if response_text is None:
+            response_text = "현재 AI 서비스에 연결할 수 없습니다. 잠시 후 다시 시도해주세요."
+            
+        ai_message = ConversationMessage(
+            conversation_id=db_conversation.id,
+            sender="ai assistant",
+            content=response_text or "현재 AI 서비스에 연결할 수 없습니다. 잠시 후 다시 시도해주세요.",
+            sequence=2  # 두 번째 메시지 (AI 응답)
+        )
+        session.add(ai_message)
+        session.commit()
+        session.refresh(ai_message)
+        
+        # 분석 데이터 생성 및 리포트 생성
+        analysis_data = await analyze_conversation_for_diseases(db_conversation.id, session)
+        report_content = await generate_conversation_report(db_conversation.id, analysis_data, session)
+        
+        # 리포트 저장
+        db_report = ConversationReport(
+            conversation_id=db_conversation.id,
+            title=f"{db_conversation.title or '대화'}에 대한 건강 분석 리포트",
+            summary="대화 내용을 분석하여 발견된 증상 및 가능성 있는 질환 정보입니다.",
+            content=report_content,
+            detected_symptoms=analysis_data.get("symptoms", []),
+            diseases_with_probabilities=analysis_data.get("diseases_with_probabilities", []),
+            health_suggestions=analysis_data.get("suggestions", [])
+        )
+        
+        # request_report가 있는 경우 리포트 제목에 반영
+        if conversation.request_report and conversation.request_report.get("body_parts"):
+            body_parts_str = ", ".join(conversation.request_report.get("body_parts", []))
+            feeling = conversation.request_report.get("feeling", "")
+            
+            if body_parts_str and feeling:
+                db_report.title = f"{body_parts_str} {feeling} 분석 리포트"
+            elif body_parts_str:
+                db_report.title = f"{body_parts_str} 관련 증상 분석 리포트"
+        
+        session.add(db_report)
+        session.commit()
+        session.refresh(db_report)
+        
+        # 대화 제목이 없는 경우, 첫 메시지 기반으로 제목 자동 생성
+        if not db_conversation.title:
+            body_parts = conversation.request_report.get("body_parts", [])
+            body_parts_str = ", ".join(body_parts) if body_parts else "증상"
+            feeling = conversation.request_report.get("feeling", "")
+            
+            if body_parts and feeling:
+                title_base = f"{body_parts_str} {feeling} 분석"
+            else:
+                title_base = f"증상 분석 리포트"
+            
+            db_conversation.title = title_base
+            session.add(db_conversation)
+            session.commit()
+            session.refresh(db_conversation)
+        
+        # 결과에 메시지와 리포트 추가
+        result.title = db_conversation.title
+        result.conversation_message = ConversationMessageRead.from_orm(ai_message)
+        result.generated_report = ConversationReportRead.from_orm(db_report)
+    
+    # 사용자가 메시지를 보낸 경우 (request_report가 없을 때)
+    elif conversation.message_content:
         # 사용자 메시지 생성 (첫 번째 메시지)
         db_message = ConversationMessage(
             conversation_id=db_conversation.id,
@@ -359,10 +474,15 @@ def create_conversation(
         
         # AI 응답 메시지 생성
         response_text = generate_ai_response(conversation.message_content)
+        
+        # 응답이 None인 경우 기본 응답으로 대체
+        if response_text is None:
+            response_text = "현재 AI 서비스에 연결할 수 없습니다. 잠시 후 다시 시도해주세요."
+            
         ai_message = ConversationMessage(
             conversation_id=db_conversation.id,
             sender="ai assistant",
-            content=response_text,
+            content=response_text or "현재 AI 서비스에 연결할 수 없습니다. 잠시 후 다시 시도해주세요.",
             sequence=2  # 두 번째 메시지 (AI 응답)
         )
         session.add(ai_message)
@@ -388,7 +508,23 @@ def create_conversation(
     # 사용자가 메시지를 보내지 않은 경우, AI가 먼저 인사
     else:
         # 사용자 정보를 기반으로 맞춤형 인사말 생성
-        greeting_text = generate_ai_greeting(user)
+        try:
+            print("AI 인사말 생성 시작...")
+            greeting_text = await generate_ai_greeting(user)
+            
+            # 응답이 None인 경우 기본 인사말로 대체
+            if greeting_text is None or greeting_text.strip() == "":
+                print("AI 인사말이 비어있어 기본 인사말로 대체합니다.")
+                greeting_text = "안녕하세요! 메디트 AI 어시스턴트입니다. 건강에 관한 궁금한 점이 있으신가요?"
+        except Exception as e:
+            print(f"AI 인사말 생성 중 오류 발생: {str(e)}")
+            greeting_text = "안녕하세요! 메디트 AI 어시스턴트입니다. 건강에 관한 궁금한 점이 있으신가요?"
+        
+        # 최종 안전 검사
+        if greeting_text is None or greeting_text.strip() == "":
+            greeting_text = "안녕하세요! 메디트 AI 어시스턴트입니다. 건강에 관한 궁금한 점이 있으신가요?"
+        
+        print(f"최종 AI 인사말: {greeting_text[:50]}..." if len(greeting_text) > 50 else greeting_text)
         
         ai_message = ConversationMessage(
             conversation_id=db_conversation.id,
@@ -461,7 +597,7 @@ def read_conversation(
 
 
 @app.post("/users/{login_id}/conversations/{conversation_id}/messages/", response_model=MessageWithResponse, tags=["Conversation Messages"], summary="대화 메시지 추가")
-def create_conversation_message(
+async def create_conversation_message(
     login_id: str = Path(..., description="사용자의 로그인 아이디"),
     conversation_id: uuid.UUID = Path(..., description="대화 ID"),
     message: ConversationMessageCreate = ...,
@@ -474,6 +610,7 @@ def create_conversation_message(
     - **conversation_id**: 대화의 ID
     - **sender**: 메시지 발신자 ('user' 또는 'ai assistant')
     - **content**: 메시지 내용
+    - **request_report**: 리포트 요청 데이터 (선택 사항, 증상 정보 등을 포함)
     
     반환값은 사용자가 보낸 메시지와 AI의 응답 메시지를 포함한 단일 객체입니다.
     """
@@ -490,25 +627,47 @@ def create_conversation_message(
         )
     ).first()
     if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        raise HTTPException(status_code=404, detail="Conversation not found or not owned by this user")
     
-    # 마지막 메시지 시퀀스 확인
+    # 메시지 순서 번호 계산
     last_message = session.exec(
         select(ConversationMessage)
         .where(ConversationMessage.conversation_id == conversation_id)
         .order_by(desc(ConversationMessage.sequence))
-        .limit(1)
     ).first()
     
     next_sequence = 1
     if last_message:
         next_sequence = last_message.sequence + 1
     
-    # 사용자 메시지 저장
+    # request_report가 있는 경우 content 수정
+    if message.request_report:
+        # 증상 정보를 문자열로 변환
+        symptom_text = ""
+        if message.request_report.get("body_parts"):
+            body_parts_str = ", ".join(message.request_report.get("body_parts", []))
+            symptom_text += f"아픈 부위: {body_parts_str}\n"
+        
+        if message.request_report.get("feeling"):
+            symptom_text += f"증상 느낌: {message.request_report.get('feeling')}\n"
+        
+        if message.request_report.get("duration"):
+            symptom_text += f"지속 기간: {message.request_report.get('duration')}\n"
+        
+        if message.request_report.get("pain_intensity"):
+            symptom_text += f"통증 강도: {message.request_report.get('pain_intensity')}\n"
+        
+        if message.request_report.get("symptom"):
+            symptom_text += f"추가 증상: {message.request_report.get('symptom')}\n"
+        
+        # 사용자 메시지 내용 업데이트
+        message.content = "다음 증상에 대해 분석해 주세요:\n" + symptom_text
+    
+    # 사용자 메시지 생성
+    user_message_data = message.dict(exclude={"request_report"})
     user_message = ConversationMessage(
+        **user_message_data,
         conversation_id=conversation_id,
-        sender="user",
-        content=message.content,
         sequence=next_sequence
     )
     session.add(user_message)
@@ -518,70 +677,71 @@ def create_conversation_message(
     # AI 응답 생성
     ai_response_text = generate_ai_response(message.content)
     
+    # 응답이 None인 경우 기본 응답으로 대체
+    if ai_response_text is None:
+        ai_response_text = "현재 AI 서비스에 연결할 수 없습니다. 잠시 후 다시 시도해주세요."
+        
     # 대화 분석 및 자동 리포트 생성 조건 확인
-    generate_report = (next_sequence + 1 == 7)  # 3번 정도의 핑퐁 후 (ai: 1,3,5, user: 2,4,6)
+    generate_report = message.request_report is not None or (next_sequence + 1 == 7)  # request_report가 있는 경우 항상 리포트 생성
+    generated_report = None
     
     # 리포트 생성이 필요한 경우 응답 내용 수정
     if generate_report:
         # 대화에서 증상 분석
-        analysis_data = analyze_conversation_for_diseases(conversation_id, session)
+        analysis_data = await analyze_conversation_for_diseases(conversation_id, session)
         
         # 리포트 생성
-        report_content = generate_conversation_report(conversation_id, analysis_data, session)
+        report_content = await generate_conversation_report(conversation_id, analysis_data, session)
         
         # 리포트 저장 (증상, 질환-확률 통합 정보, 제안 정보 포함)
+        title = f"{conversation.title}에 대한 건강 분석 리포트"
+        
+        # request_report가 있는 경우 리포트 제목에 반영
+        if message.request_report and message.request_report.get("body_parts"):
+            body_parts_str = ", ".join(message.request_report.get("body_parts", []))
+            feeling = message.request_report.get("feeling", "")
+            
+            if body_parts_str and feeling:
+                title = f"{body_parts_str} {feeling} 분석 리포트"
+            elif body_parts_str:
+                title = f"{body_parts_str} 관련 증상 분석 리포트"
+        
         report = ConversationReport(
             conversation_id=conversation_id,
-            title="자동 생성된 건강 분석 리포트",
-            summary="AI가 분석한 건강 상태 요약",
+            title=title,
+            summary="대화 내용을 분석하여 발견된 증상 및 가능성 있는 질환 정보입니다.",
             content=report_content,
-            detected_symptoms=analysis_data["symptoms"],
-            diseases_with_probabilities=analysis_data["diseases_with_probabilities"],
-            health_suggestions=analysis_data["suggestions"]
+            detected_symptoms=analysis_data.get("symptoms", []),
+            diseases_with_probabilities=analysis_data.get("diseases_with_probabilities", []),
+            health_suggestions=analysis_data.get("suggestions", [])
         )
         session.add(report)
         session.commit()
         session.refresh(report)
         
-        # AI 응답을 리포트 관련 내용으로 변경
-        ai_response_text = f"""대화 내용을 분석한 결과, 다음과 같은 건강 상태가 감지되었습니다:
-
-감지된 증상: {', '.join(analysis_data["symptoms"]) if analysis_data["symptoms"] else "특별한 증상이 감지되지 않음"}
-
-가능성 있는 질환:
-{", ".join([f'{disease["name"]} ({disease["probability"]}%)' for disease in analysis_data["diseases_with_probabilities"][:3]])}
-
-자세한 분석 내용을 담은 건강 리포트를 생성했습니다. 리포트에서 더 상세한 정보와 건강 관리 조언을 확인하실 수 있습니다.
-
-이 분석은 대화 내용을 기반으로 한 참고 사항이며, 정확한 진단을 위해서는 의사와 상담하시기 바랍니다."""
+        # 생성된 리포트 정보 저장
+        generated_report = ConversationReportRead.from_orm(report)
+        
+        # AI 응답에 리포트 생성 알림 추가
+        ai_response_text = f"{ai_response_text}\n\n*분석이 완료되어 건강 리포트가 생성되었습니다.*"
     
-    # AI 응답 저장
+    # AI 메시지 생성
     ai_message = ConversationMessage(
         conversation_id=conversation_id,
         sender="ai assistant",
-        content=ai_response_text,
+        content=ai_response_text or "현재 AI 서비스에 연결할 수 없습니다. 잠시 후 다시 시도해주세요.",
         sequence=next_sequence + 1
     )
     session.add(ai_message)
     session.commit()
     session.refresh(ai_message)
     
-    # 응답 구성
-    if generate_report:
-        # 리포트 정보를 응답에 포함
-        result = MessageWithResponse(
-            user_message=ConversationMessageRead.from_orm(user_message),
-            conversation_message=ConversationMessageRead.from_orm(ai_message),
-            generated_report=ConversationReportRead.from_orm(report)
-        )
-    else:
-        # 일반 응답 구성
-        result = MessageWithResponse(
-            user_message=ConversationMessageRead.from_orm(user_message),
-            conversation_message=ConversationMessageRead.from_orm(ai_message)
-        )
-    
-    return result
+    # 응답 데이터 생성
+    return MessageWithResponse(
+        user_message=ConversationMessageRead.from_orm(user_message),
+        conversation_message=ConversationMessageRead.from_orm(ai_message),
+        generated_report=generated_report
+    )
 
 
 @app.get("/conversations/{conversation_id}/messages/", response_model=list[ConversationMessageRead], tags=["Conversation Messages"], summary="대화 메시지 목록 조회")

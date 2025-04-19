@@ -4,6 +4,7 @@ OpenAI LLM 서비스 구현
 import os
 from typing import List, Dict, Any, Optional
 import json
+import logging
 from openai import AsyncOpenAI
 
 from app.llm.base import LLMService
@@ -23,6 +24,11 @@ class OpenAIService(LLMService):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError("OpenAI API 키가 필요합니다. 'OPENAI_API_KEY' 환경 변수를 설정하거나 초기화 시 제공하세요.")
+        
+        # API 키 마스킹 로깅 (보안을 위해 일부만 표시)
+        masked_key = self.api_key[:8] + "..." + self.api_key[-4:] if len(self.api_key) > 12 else "***"
+        print(f"OpenAI API 키 설정됨: {masked_key}")
+        print(f"OpenAI 모델: {model}")
         
         self.client = AsyncOpenAI(api_key=self.api_key)
         self.model = model
@@ -137,3 +143,35 @@ class OpenAIService(LLMService):
             'openai'
         """
         return "openai"
+        
+    async def test_api_key(self) -> Dict[str, Any]:
+        """
+        OpenAI API 키의 유효성을 테스트합니다.
+        
+        Returns:
+            테스트 결과를 담은 사전
+        """
+        try:
+            print(f"OpenAI API 키 테스트 시작 (모델: {self.model})")
+            
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "Hello, this is an API key test."}],
+                max_tokens=10
+            )
+            
+            print(f"OpenAI API 키 테스트 성공: {response}")
+            return {
+                "success": True,
+                "model": self.model,
+                "response": response.choices[0].message.content.strip() if response.choices else None
+            }
+            
+        except Exception as e:
+            error_message = str(e)
+            print(f"OpenAI API 키 테스트 실패: {error_message}")
+            return {
+                "success": False,
+                "model": self.model,
+                "error": error_message
+            }

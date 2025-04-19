@@ -126,6 +126,8 @@ async def generate_ai_response(user_message: str) -> str:
         
         # LLM 서비스를 통해 응답 생성
         response = await llm_service.generate_chat(messages)
+
+        print(f"AI 응답: {response}")
         return response
         
     except Exception as e:
@@ -193,35 +195,33 @@ async def generate_ai_greeting(user: User) -> str:
     Returns:
         사용자 맞춤형 인사말
     """
+    print(f"인사말 생성 시작 - 사용자: {user.login_id}, 닉네임: {user.nickname}")
+    
     try:
         # LLM 서비스 가져오기
         llm_service = get_llm_service()
         
-        # 사용자 정보를 포함한 프롬프트 구성
-        user_info = f"""
-        사용자 정보:
-        - 이름: {user.nickname if user.nickname else '이름 없음'}
-        - 연령대: {user.age_range if user.age_range else '정보 없음'}
-        - 성별: {user.gender if user.gender else '정보 없음'}
-        - 평소 앓는 질환: {', '.join(user.usual_illness) if user.usual_illness and len(user.usual_illness) > 0 else '없음'}
-        """
         
         system_message = """
         당신은 건강 상담을 전문으로 하는 친절한 AI 의료 어시스턴트입니다.
-        사용자의 정보를 기반으로 맞춤형 인사말을 생성하세요.
-        인사말은 따뜻하고 공감적이어야 하며, 사용자의 평소 질환이 있다면 이에 대해 언급하세요.
-        의학적 조언이나 진단을 제시하지 말고, 단순히 인사하고 어떤 도움이 필요한지 물어보세요.
+        지금 첫인사를 건네며, 사용자의 프로필 정보를 참고해 개인화된 인사말을 제공하세요.
+        항상 공감과 존중의 태도로 대화를 시작하며, 의학적 정보가 필요하면 질문해도 좋다고 알려주세요.
         """
+        
+        # 사용자 정보를 기반으로 한 인사말 프롬프트 구성
+        user_info = f"사용자 정보: 닉네임={user.nickname}, 성별={user.gender}, 연령대={user.age_range}"
+        
+        if user.usual_illness and len(user.usual_illness) > 0:
+            user_info += f", 평소 건강 이슈: {', '.join(user.usual_illness)}"
         
         prompt = f"""
-        다음 사용자에게 처음 인사하는 메시지를 만들어주세요:
         {user_info}
         
-        인사말에는 다음 내용을 포함하세요:
-        1. 사용자의 이름으로 인사
-        2. 사용자의 평소 질환이 있다면 이에 대해 물어봄
-        3. 건강 상담 AI 어시스턴트로서 어떻게 도울 수 있는지 안내
+        위 정보를 바탕으로 친절하고 개인화된 첫 인사말을 작성해주세요.
+        사용자의 건강 상태에 공감하고, 어떻게 도울 수 있는지 알려주세요.
         """
+        
+        print(f"OpenAI에 인사말 생성 요청 - 프롬프트 길이: {len(prompt)}")
         
         # 채팅 메시지 구성
         messages = [
@@ -231,11 +231,14 @@ async def generate_ai_greeting(user: User) -> str:
         
         # LLM 서비스를 통해 인사말 생성
         greeting = await llm_service.generate_chat(messages)
+        
+        print(f"OpenAI 인사말 응답 결과: {greeting[:50]}..." if greeting and len(greeting) > 50 else f"응답: {greeting}")
+        
         return greeting
         
     except Exception as e:
-        print(f"LLM 서비스 오류: {str(e)}")
-        # 오류 발생 시 기본 인사말 제공 (기존 규칙 기반 인사말 사용)
+        print(f"인사말 생성 오류: {str(e)}")
+        # 오류 발생 시 기본 인사말 제공
         return fallback_generate_greeting(user)
 
 
