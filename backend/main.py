@@ -393,7 +393,11 @@ async def create_conversation(
         session.refresh(db_message)
         
         # AI 응답 메시지 생성
-        response_text = await generate_ai_response(user_message_content)
+        try:
+            response_text = await generate_ai_response(user_message_content)
+        except Exception as e:
+            print(f"AI 응답 생성 오류: {str(e)}")
+            response_text = "죄송합니다. 현재 AI 서비스에 연결할 수 없습니다. 잠시 후 다시 시도해주세요."
         
         # 응답이 None인 경우 기본 응답으로 대체
         if response_text is None:
@@ -473,7 +477,11 @@ async def create_conversation(
         session.refresh(db_message)
         
         # AI 응답 메시지 생성
-        response_text = generate_ai_response(conversation.message_content)
+        try:
+            response_text = await generate_ai_response(conversation.message_content)
+        except Exception as e:
+            print(f"AI 응답 생성 오류: {str(e)}")
+            response_text = "죄송합니다. 현재 AI 서비스에 연결할 수 없습니다. 잠시 후 다시 시도해주세요."
         
         # 응답이 None인 경우 기본 응답으로 대체
         if response_text is None:
@@ -675,7 +683,11 @@ async def create_conversation_message(
     session.refresh(user_message)
     
     # AI 응답 생성
-    ai_response_text = generate_ai_response(message.content)
+    try:
+        ai_response_text = await generate_ai_response(message.content)
+    except Exception as e:
+        print(f"AI 응답 생성 오류: {str(e)}")
+        ai_response_text = "현재 AI 서비스에 연결할 수 없습니다. 잠시 후 다시 시도해주세요."
     
     # 응답이 None인 경우 기본 응답으로 대체
     if ai_response_text is None:
