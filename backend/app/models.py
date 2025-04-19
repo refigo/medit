@@ -207,9 +207,9 @@ class ConversationReportBase(SQLModel):
     summary: Optional[str] = Field(default=None, max_length=500)
     content: str = Field(sa_column=Column(Text))
     detected_symptoms: Optional[List[str]] = Field(default=None, sa_column=Column(ARRAY(String)))
-    # 질환과 확률을 함께 저장하는 리스트 필드: [{name: "질환명", probability: 80.5}, ...]
     diseases_with_probabilities: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
     health_suggestions: Optional[List[str]] = Field(default=None, sa_column=Column(ARRAY(String)))
+    severity_level: Optional[str] = Field(default="green", description="응급도 수준: red(심한 통증/위급), orange(중간 통증/불편), green(통증 없음/양호)")
 
 
 class ConversationReport(ConversationReportBase, table=True):

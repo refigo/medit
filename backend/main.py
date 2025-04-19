@@ -29,6 +29,33 @@ from app.llm.openai_service import OpenAIService
 
 app = FastAPI(title="Medit API")
 
+# 앱 시작 이벤트
+@app.on_event("startup")
+async def startup():
+    # 설정 출력
+    print("서버가 시작되었습니다!")
+    
+    # severity_level 열 추가 시도
+    try:
+        # 데이터베이스 연결
+        db_session = next(get_session())
+        
+        # 해당 열이 존재하는지 확인
+        result = db_session.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name='conversation_reports' AND column_name='severity_level'")).fetchone()
+        
+        # 열이 존재하지 않으면 추가
+        if not result:
+            print("conversation_reports 테이블에 severity_level 열을 추가합니다...")
+            db_session.execute(text("ALTER TABLE conversation_reports ADD COLUMN severity_level VARCHAR DEFAULT 'green'"))
+            db_session.commit()
+            print("severity_level 열이 성공적으로 추가되었습니다.")
+        else:
+            print("severity_level 열이 이미 존재합니다.")
+            
+        db_session.close()
+    except Exception as e:
+        print(f"데이터베이스 열 추가 오류: {str(e)}")
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -415,7 +442,11 @@ async def create_conversation(
         
         # 분석 데이터 생성 및 리포트 생성
         analysis_data = await analyze_conversation_for_diseases(db_conversation.id, session)
-        report_content = await generate_conversation_report(db_conversation.id, analysis_data, session)
+        report_result = await generate_conversation_report(db_conversation.id, analysis_data, session)
+        
+        # 결과에서 report_content와 severity_level 추출
+        report_content = report_result["content"]
+        severity_level = report_result["severity_level"]
         
         # 리포트 저장
         db_report = ConversationReport(
@@ -425,7 +456,8 @@ async def create_conversation(
             content=report_content,
             detected_symptoms=analysis_data.get("symptoms", []),
             diseases_with_probabilities=analysis_data.get("diseases_with_probabilities", []),
-            health_suggestions=analysis_data.get("suggestions", [])
+            health_suggestions=analysis_data.get("suggestions", []),
+            severity_level=severity_level
         )
         
         # request_report가 있는 경우 리포트 제목에 반영
@@ -703,7 +735,9 @@ async def create_conversation_message(
         analysis_data = await analyze_conversation_for_diseases(conversation_id, session)
         
         # 리포트 생성
-        report_content = await generate_conversation_report(conversation_id, analysis_data, session)
+        report_result = await generate_conversation_report(conversation_id, analysis_data, session)
+        report_content = report_result["content"]
+        severity_level = report_result["severity_level"]
         
         # 리포트 저장 (증상, 질환-확률 통합 정보, 제안 정보 포함)
         title = f"{conversation.title}에 대한 건강 분석 리포트"
@@ -725,8 +759,20 @@ async def create_conversation_message(
             content=report_content,
             detected_symptoms=analysis_data.get("symptoms", []),
             diseases_with_probabilities=analysis_data.get("diseases_with_probabilities", []),
-            health_suggestions=analysis_data.get("suggestions", [])
+            health_suggestions=analysis_data.get("suggestions", []),
+            severity_level=severity_level
         )
+        
+        # request_report가 있는 경우 리포트 제목에 반영
+        if message.request_report and message.request_report.get("body_parts"):
+            body_parts_str = ", ".join(message.request_report.get("body_parts", []))
+            feeling = message.request_report.get("feeling", "")
+            
+            if body_parts_str and feeling:
+                report.title = f"{body_parts_str} {feeling} 분석 리포트"
+            elif body_parts_str:
+                report.title = f"{body_parts_str} 관련 증상 분석 리포트"
+        
         session.add(report)
         session.commit()
         session.refresh(report)

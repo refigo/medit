@@ -3,6 +3,7 @@ from sqlmodel import Session, select
 import uuid
 import asyncio
 from datetime import datetime
+import re
 
 from app.models import (
     User, Conversation, ConversationMessage, Disease
@@ -509,7 +510,7 @@ def analyze_conversation_for_diseases_sync(conversation_id: uuid.UUID, session: 
 
 
 # 대화 내용을 분석하여 리포트 내용 생성
-async def generate_conversation_report(conversation_id: uuid.UUID, analysis_data: dict, session: Session) -> str:
+async def generate_conversation_report(conversation_id: uuid.UUID, analysis_data: dict, session: Session) -> dict:
     """대화 내용을 분석하여 건강 분석 리포트를 생성합니다."""
     # 대화에서 사용자 정보 가져오기
     conversation = session.get(Conversation, conversation_id)
@@ -567,6 +568,14 @@ async def generate_conversation_report(conversation_id: uuid.UUID, analysis_data
         5. 건강 관리 조언
         6. 면책 조항
 
+        추가적으로, 다음 3가지 중 하나로 응급도 수준을 판단해주세요:
+        - red: 심한 통증이나 위급한 상황으로 즉각적인 의료 조치가 필요한 경우
+        - orange: 중간 정도 통증이나 불편함으로 가까운 시일 내 의료 조치가 필요한 경우
+        - green: 통증이 없거나 양호한 상태로 정기적인 관리만 필요한 경우
+
+        리포트 마지막에 다음 형식으로 응급도를 표시해주세요:
+        "SEVERITY_LEVEL: [red/orange/green]"
+
         주의: 최종 진단은 내리지 말고, 항상 전문의와 상담을 권장하세요.
         리포트는 마크다운 형식으로 작성해주세요.
         """
@@ -601,12 +610,44 @@ async def generate_conversation_report(conversation_id: uuid.UUID, analysis_data
         
         # LLM 서비스를 통해 리포트 생성
         report = await llm_service.generate_chat(messages)
-        return report
+        
+        # 응급도 수준 추출
+        severity_level = "green"  # 기본값
+        severity_pattern = r"SEVERITY_LEVEL:\s*(red|orange|green)"
+        match = re.search(severity_pattern, report, re.IGNORECASE)
+        if match:
+            severity_level = match.group(1).lower()
+            # 리포트에서 SEVERITY_LEVEL 표시 제거 (UI에서 별도로 표시할 예정)
+            report = re.sub(r"\nSEVERITY_LEVEL:\s*(red|orange|green)\s*", "", report)
+        
+        # 만약 pain_intensity가 있으면 이를 기반으로 severity_level 추가 판단
+        # analysis_data에 pain_intensity 정보가 있는 경우
+        try:
+            if "pain_intensity" in analysis_data:
+                pain_level = float(analysis_data["pain_intensity"])
+                if pain_level >= 7:
+                    severity_level = "red"
+                elif pain_level >= 4:
+                    severity_level = "orange"
+                else:
+                    severity_level = "green"
+        except (ValueError, TypeError):
+            pass  # pain_intensity가 올바른 형식이 아닌 경우 무시
+            
+        # severity_level과 report를 딕셔너리로 반환
+        return {
+            "content": report,
+            "severity_level": severity_level
+        }
         
     except Exception as e:
         print(f"LLM 리포트 생성 오류: {str(e)}")
         # 오류 발생 시 기본 리포트 제공 (기존 규칙 기반 리포트 사용)
-        return fallback_generate_report(conversation_id, analysis_data, session)
+        fallback_report = fallback_generate_report(conversation_id, analysis_data, session)
+        return {
+            "content": fallback_report,
+            "severity_level": "green"  # 오류 시 안전하게 기본값으로 설정
+        }
 
 
 # 기존 규칙 기반 리포트 생성 함수 (LLM 서비스 실패 시 대비책)
@@ -669,7 +710,7 @@ def fallback_generate_report(conversation_id: uuid.UUID, analysis_data: dict, se
 
 
 # 동기 버전의 리포트 생성 함수 (기존 코드와의 호환성 유지)
-def generate_conversation_report_sync(conversation_id: uuid.UUID, analysis_data: dict, session: Session) -> str:
+def generate_conversation_report_sync(conversation_id: uuid.UUID, analysis_data: dict, session: Session) -> dict:
     """
     generate_conversation_report의 동기 버전 (기존 코드와의 호환성 유지)
     """
