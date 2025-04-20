@@ -746,7 +746,7 @@ async def create_conversation_message(
         ai_response_text = "현재 AI 서비스에 연결할 수 없습니다. 잠시 후 다시 시도해주세요."
         
     # 대화 분석 및 자동 리포트 생성 조건 확인
-    generate_report = message.request_report is not None or (next_sequence + 1 == 7)  # request_report가 있는 경우 항상 리포트 생성
+    generate_report = message.request_report is not None # request_report가 있는 경우 항상 리포트 생성
     generated_report = None
     
     # 리포트 생성이 필요한 경우 응답 내용 수정
